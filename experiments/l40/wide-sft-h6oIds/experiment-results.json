@@ -7,13 +7,23 @@
     "fps": 50,
     "source_range_mm_each_axis": 20,
     "target_range_mm_each_axis": 40,
-    "selection": 2000,
+    "validation_cases": 30,
+    "test_cases": 50,
     "collection_failures": {
       "seat": 3
     },
     "audit_first_attempt": 98,
     "audit_including_joint_reset_retries": 101,
     "audit_cases": 101
+  },
+  "batch1_training": {
+    "effective_batch_size": 1,
+    "optimizer_updates": 6000,
+    "sampled_windows": 6000,
+    "approximate_passes": 0.18592544389761764,
+    "optimizer_peak_lr": 2.5e-05,
+    "selected_checkpoint": 2000,
+    "log": "train.log"
   },
   "batch32_training": {
     "batch_size": 16,
