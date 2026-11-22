@@ -12,8 +12,47 @@ import torch
 
 from . import upstream
 from .fast16 import FastMetrics
-from .online import Policy
-from .wide_eval import evaluate
+
+
+@torch.inference_mode()
+def evaluate(policy, processors, cases, output, env_type):
+    preprocess, postprocess = processors
+    envs = [env_type(), env_type()]
+    try:
+        with output.open("x", buffering=1) as stream:
+            for start in range(0, len(cases), 2):
+                group = cases[start:start+2]
+                for env, case in zip(envs, group):
+                    env.start(case)
+                generators = [torch.Generator(device="cuda").manual_seed(c["noise"]) for c in group]
+                active = list(range(len(group)))
+                while active:
+                    batches = []
+                    for i in active:
+                        obs = envs[i].observation()
+                        frame = {"task": obs["task"], "observation.state": torch.from_numpy(obs["observation.state"])}
+                        for camera in ("top", "wrist"):
+                            key = "observation.images."+camera
+                            frame[key] = torch.from_numpy(obs[key]).permute(2, 0, 1).float()/255
+                        batches.append(preprocess(frame))
+                    batch = {k: torch.cat([b[k] for b in batches]) for k,v in batches[0].items()
+                             if isinstance(v, torch.Tensor)}
+                    noise = torch.cat([torch.randn((1, policy.config.chunk_size, policy.config.max_action_dim),
+                                                   device="cuda", generator=generators[i]) for i in active])
+                    predictions = policy.predict_action_chunk(batch, noise=noise)[:, :10].float().cpu()
+                    remaining = []
+                    for i, pred in zip(active, predictions):
+                        for action in postprocess(pred.unsqueeze(0))[0].numpy():
+                            _, done, timeout, info = envs[i].step(action)
+                            if done or timeout:
+                                print(json.dumps(dict(index=start+i, case=group[i], steps=envs[i].steps, **info)), file=stream)
+                                break
+                        else:
+                            remaining.append(i)
+                    active = remaining
+    finally:
+        for env in envs:
+            env.close()
 
 
 def main():
@@ -57,10 +96,6 @@ def main():
         return result
 
     def evaluate_ema(ema):
-        wrapper = Policy.__new__(Policy)
-        wrapper.policy = raw
-        wrapper.preprocess, wrapper.postprocess = processors
-        wrapper.execution_steps, wrapper.encoder, wrapper.token_dim = 10, None, 0
         env_type = partial(FastMetrics, target_bore_radius=.005+settings["clearance_mm"]/1000)
         summary = {}
         with torch.random.fork_rng(devices=[0]), trainer._ema_weights(ema, raw):
@@ -68,7 +103,7 @@ def main():
             try:
                 for group in ("train", "validation"):
                     path = root/f"{group}-{completed}.jsonl"
-                    evaluate(wrapper, cases[group], path, env_type=env_type, batch_size=2)
+                    evaluate(raw, processors, cases[group], path, env_type)
                     rows = [json.loads(x) for x in path.read_text().splitlines()]
                     assert sorted(r["index"] for r in rows) == list(range(len(cases[group])))
                     errors = [r["closure_xy_mm"] for r in rows if r["closure_xy_mm"] is not None]
