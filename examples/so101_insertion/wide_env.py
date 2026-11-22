@@ -57,6 +57,34 @@ class WideInsertion(Insertion):
             contained = np.all(np.maximum(self.normals @ xy, self.normals @ upper) + support <= self.faces)
         return float(tilt), float(np.linalg.norm(xy)), float(bottom), bool(contained)
 
+    def bolt_ik(self, position, axis, start):
+        """Solve the held shaft tip and axis using its measured transform in the TCP."""
+        tcp = self.data.site("grasp")
+        rotation = tcp.xmat.reshape(3, 3)
+        bolt = self.data.body("bolt")
+        local_tip = rotation.T @ (bolt.xpos-tcp.xpos)
+        local_axis = rotation.T @ bolt.xmat.reshape(3, 3)[:, 2]
+        q = np.asarray(start, dtype=float).copy()
+        jp = np.zeros((3, self.model.nv))
+        jr = np.zeros_like(jp)
+        for _ in range(100):
+            self.ik_data.qpos[self.joints] = q
+            mujoco.mj_forward(self.model, self.ik_data)
+            site = self.ik_data.site("grasp")
+            rotation = site.xmat.reshape(3, 3)
+            tip = site.xpos + rotation @ local_tip
+            up = rotation @ local_axis
+            error = position-tip
+            if np.linalg.norm(error) < .00005 and np.dot(up, axis) > .9999995:
+                return q
+            mujoco.mj_jac(self.model, self.ik_data, jp, jr, tip,
+                          int(self.model.site_bodyid[self.grasp_id]))
+            jac = np.vstack([jp, .12*(np.eye(3)-np.outer(up, up))@jr])[:, self.dofs[:5]]
+            residual = np.r_[error, .12*np.cross(up, axis)]
+            delta = np.linalg.solve(jac.T@jac + .00005*np.eye(5), jac.T@residual)
+            q[:5] = np.clip(q[:5]+np.clip(delta, -.1, .1), self.low[:5], self.high[:5])
+        raise RuntimeError(f"Held-bolt IK did not converge: tip error {np.linalg.norm(error):.6f} m")
+
     def step(self, action):
         self.max_jump = max(self.max_jump, float(np.max(np.abs(action - self.data.ctrl))))
         _, _, timeout, info = super().step(action)
@@ -125,13 +153,13 @@ def expert(env, case, record=None, at_pick=None):
         return info
     xy_correction = np.zeros(2)
 
-    def track_tip(z):
+    def track_tip(z, axis=(0., 0., 1.)):
         nonlocal cmd, info
         tip = env.data.body("bolt").xpos
         xy_correction[:] = np.clip(xy_correction + np.clip(.2*(target-tip[:2]), -.0001, .0001),
                                    -.002, .002)
-        point = np.r_[target+xy_correction, z]-tip_offset()
-        cmd = env.inverse_kinematics(point, cmd)
+        point = np.r_[target+xy_correction, z]
+        cmd = env.bolt_ik(point, np.asarray(axis), cmd)
         cmd[-1] = -.055
         action = cmd.astype(np.float32)
         if record:
@@ -141,10 +169,13 @@ def expert(env, case, record=None, at_pick=None):
 
     env.phase = "air_align"
     start_z = float(env.data.body("bolt").xpos[2])
+    start_axis = env.data.body("bolt").xmat.reshape(3, 3)[:, 2].copy()
     for tick in range(1, 51):
         f = tick/50
-        z = start_z + (MOUTH_Z+.005-start_z)*(f*f*(3-2*f))
-        if track_tip(z):
+        blend = f*f*(3-2*f)
+        z = start_z + (MOUTH_Z+.005-start_z)*blend
+        axis = (1-blend)*start_axis + blend*np.array([0., 0., 1.])
+        if track_tip(z, axis/np.linalg.norm(axis)):
             return info
     # 65 constant-speed descent ticks plus at most 35 settling ticks: 100 total.
     for tick in range(1, 101):

@@ -93,7 +93,7 @@ def preflight(root, clearance):
     env = WideInsertion(target_bore_radius=.005 + clearance/1000)
     (root/"environment.json").write_text(json.dumps(dict(clearance_mm=clearance,
         source_jitter_mm=0,target_range_mm=18,control_hz=50,stable_ticks=25,
-        insertion_tick_limit=100,descent_ticks=65,expert="tip_offset_continuous_xy"),indent=2))
+        insertion_tick_limit=100,descent_ticks=65,expert="held_bolt_pose_ik_continuous_xy"),indent=2))
     try:
         with (root/"expert-check.jsonl").open("x", buffering=1) as log:
             for group, group_cases in cases.items():
