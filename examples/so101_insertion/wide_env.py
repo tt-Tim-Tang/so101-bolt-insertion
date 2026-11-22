@@ -75,7 +75,8 @@ class WideInsertion(Insertion):
             tip = site.xpos + rotation @ local_tip
             up = rotation @ local_axis
             error = position-tip
-            if np.linalg.norm(error) < .00005 and np.dot(up, axis) > .9999995:
+            # 0.005 rad contributes <0.2 mm across the 32 mm bore depth.
+            if np.linalg.norm(error) < .00005 and np.dot(up, axis) > np.cos(.005):
                 return q
             mujoco.mj_jac(self.model, self.ik_data, jp, jr, tip,
                           int(self.model.site_bodyid[self.grasp_id]))
@@ -83,7 +84,8 @@ class WideInsertion(Insertion):
             residual = np.r_[error, .12*np.cross(up, axis)]
             delta = np.linalg.solve(jac.T@jac + .00005*np.eye(5), jac.T@residual)
             q[:5] = np.clip(q[:5]+np.clip(delta, -.1, .1), self.low[:5], self.high[:5])
-        raise RuntimeError(f"Held-bolt IK did not converge: tip error {np.linalg.norm(error):.6f} m")
+        raise RuntimeError(f"Held-bolt IK did not converge: tip error {np.linalg.norm(error):.6f} m, "
+                           f"axis error {np.arccos(np.clip(np.dot(up, axis), -1, 1)):.6f} rad")
 
     def step(self, action):
         self.max_jump = max(self.max_jump, float(np.max(np.abs(action - self.data.ctrl))))
@@ -159,7 +161,8 @@ def expert(env, case, record=None, at_pick=None):
         xy_correction[:] = np.clip(xy_correction + np.clip(.2*(target-tip[:2]), -.0001, .0001),
                                    -.002, .002)
         point = np.r_[target+xy_correction, z]
-        cmd = env.bolt_ik(point, np.asarray(axis), cmd)
+        target_q = env.bolt_ik(point, np.asarray(axis), cmd)
+        cmd[:5] += np.clip(target_q[:5]-cmd[:5], -.025, .025)
         cmd[-1] = -.055
         action = cmd.astype(np.float32)
         if record:
