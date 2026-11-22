@@ -1,0 +1,12 @@
+{
+  "seen": {
+    "n": 16,
+    "pickup": 2,
+    "arrival": 0
+  },
+  "validation": {
+    "n": 30,
+    "pickup": 4,
+    "arrival": 0
+  }
+}
