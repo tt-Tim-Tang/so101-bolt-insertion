@@ -1,0 +1,93 @@
+{
+  "frames": 32271,
+  "attempts": 67,
+  "training_episodes": 64,
+  "demo_failures": {
+    "seat": 3
+  },
+  "validation-2000": {
+    "n": 30,
+    "pickup": 1,
+    "arrival": 0,
+    "alignment": 0,
+    "success": 0,
+    "failures": {
+      "pickup": 29,
+      "arrival": 1
+    }
+  },
+  "validation-4000": {
+    "n": 30,
+    "pickup": 1,
+    "arrival": 0,
+    "alignment": 0,
+    "success": 0,
+    "failures": {
+      "pickup": 29,
+      "arrival": 1
+    }
+  },
+  "validation-6000": {
+    "n": 30,
+    "pickup": 0,
+    "arrival": 0,
+    "alignment": 0,
+    "success": 0,
+    "failures": {
+      "pickup": 30
+    }
+  },
+  "final-test": {
+    "n": 50,
+    "pickup": 1,
+    "arrival": 0,
+    "alignment": 0,
+    "success": 0,
+    "failures": {
+      "pickup": 49,
+      "arrival": 1
+    }
+  },
+  "fixed": {
+    "full": {
+      "n": 30,
+      "setup_failures": 0,
+      "successes": 0
+    },
+    "after_pick": {
+      "n": 30,
+      "setup_failures": 0,
+      "successes": 0
+    }
+  },
+  "visual_probe": {
+    "total": 30,
+    "available": 30,
+    "positive": 30,
+    "median_signed_mm": 3.669313855368155
+  },
+  "selection": {
+    "scores": {
+      "2000": [
+        0,
+        0,
+        0,
+        1
+      ],
+      "4000": [
+        0,
+        0,
+        0,
+        1
+      ],
+      "6000": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    "step": 2000,
+    "checkpoint": "/root/gpufree-data/so101-insertion/outputs/wide-sft-h6oIds/train/checkpoints/002000/pretrained_model"
+  }
+}
