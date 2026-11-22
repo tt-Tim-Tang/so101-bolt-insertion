@@ -18,7 +18,7 @@ TARGET = (0.19, 0.057)
 MOUTH_Z = 0.045
 SHAFT_RADIUS = 0.005
 BORE_RADIUS = 0.0065
-HOME = np.array([0, -0.75, 1.15, 1.15, 0, 0.6])
+HOME = np.array([0.35862603, -0.29358862, 0.28302232, 1.58096861, -0.02063390, 0.6])
 
 
 def scene_model(arm: Path, parts: Path, *, target_bore_radius=BORE_RADIUS, show_target_colliders=False) -> mujoco.MjModel:
@@ -38,8 +38,8 @@ def scene_model(arm: Path, parts: Path, *, target_bore_radius=BORE_RADIUS, show_
                   rgba=".3 .32 .35 1")
     world.find("body[@name='base']").set("pos", "0 0 .04")
     ET.SubElement(world, "light", pos="0 -.4 .7", dir=".2 .3 -1", directional="true")
-    ET.SubElement(world, "camera", name="top", pos=".39 -.43 .48", fovy="43",
-                  xyaxes=".93 .37 0  -.28 .68 .68")
+    ET.SubElement(world, "camera", name="top", pos=".69998950 -.04942312 .38777779", fovy="34.98425",
+                  xyaxes=".09645819 .99533704 0  -.47891863 .04641204 .87663155")
     gripper = world.find(".//body[@name='gripper']")
     ET.SubElement(gripper, "site", name="grasp", pos=".002 0 -.098", size=".002", group="3")
 
