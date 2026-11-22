@@ -7,6 +7,75 @@ from pathlib import Path
 import numpy as np
 
 from .wide_env import WideInsertion, expert
+from .scene import IMAGE_SIZE, JOINTS
+
+
+class FastMetrics(WideInsertion):
+    def start(self, case):
+        super().start(case)
+        self.closure_xy_mm = None
+
+    def step(self, action):
+        reward, done, timeout, info = super().step(action)
+        if self.closure_xy_mm is None and self.state()[-1] < .15:
+            bolt = self.data.body("bolt")
+            head = bolt.xpos + .045 * bolt.xmat.reshape(3, 3)[:, 2]
+            self.closure_xy_mm = float(1000*np.linalg.norm(self.data.site("grasp").xpos[:2]-head[:2]))
+        info["closure_xy_mm"] = self.closure_xy_mm
+        return reward, done, timeout, info
+
+
+def collect(root):
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+    cases = json.loads((root/"splits.json").read_text())
+    settings = json.loads((root/"environment.json").read_text())
+    features = {k: dict(dtype="float32", shape=(6,), names=list(JOINTS))
+                for k in ("observation.state", "action")}
+    for camera in ("top", "wrist"):
+        features["observation.images."+camera] = dict(dtype="image", shape=(IMAGE_SIZE,IMAGE_SIZE,3),
+                                                      names=["height","width","channel"])
+    ds = LeRobotDataset.create(repo_id="local/so101_fast16", fps=50, root=root/"dataset", features=features,
+                              robot_type="so101_mujoco", use_videos=False, video_backend="pyav")
+    env = FastMetrics(target_bore_radius=.005+settings["clearance_mm"]/1000)
+    first = None
+    rows = []
+    try:
+        with (root/"collection.jsonl").open("x", buffering=1) as log:
+            for i, case in enumerate(cases["train"]):
+                frames, counts = [], {}
+                def record(action):
+                    frames.append(dict(**env.observation(), action=action.copy()))
+                    counts[env.phase] = counts.get(env.phase, 0)+1
+                result = expert(env, case, record=record, seat_correction_rounds=3, seat_hold_ticks=25)
+                row = dict(index=i, case=case, frames=len(frames), phase_frames=counts, **result)
+                print(json.dumps(row), file=log)
+                if not result["success"]:
+                    raise RuntimeError(f"Expert failed on fixed training case {i}; dataset incomplete")
+                for frame in frames:
+                    ds.add_frame(frame.copy())
+                ds.save_episode()
+                if first is None:
+                    first = [f["action"] for f in frames]
+                rows.append(row)
+                print("COLLECTED", i, len(frames), flush=True)
+        with (root/"fixed-validation.jsonl").open("x", buffering=1) as log:
+            for i, case in enumerate(cases["validation"]):
+                env.start(case)
+                while True:
+                    _, done, timeout, info = env.step(first[min(env.steps, len(first)-1)])
+                    if done or timeout:
+                        break
+                print(json.dumps(dict(index=i, case=case, steps=env.steps, **info)), file=log)
+        total = sum(r["frames"] for r in rows)
+        near = sum(sum(n for phase,n in r["phase_frames"].items()
+                       if phase in ("slow_approach","prealign","align","insert","seat")) for r in rows)
+        summary = dict(episodes=len(rows), frames=total, mean_frames=total/len(rows), hole_phase_fraction=near/total)
+        (root/"dataset-summary.json").write_text(json.dumps(summary, indent=2))
+        print("DATASET", summary, flush=True)
+    finally:
+        ds.finalize()
+        env.close()
 
 
 def make_cases():
@@ -43,8 +112,11 @@ def preflight(root, clearance):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=("preflight",))
+    parser.add_argument("mode", choices=("preflight", "collect"))
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--clearance",type=float,default=.7)
     args = parser.parse_args()
-    preflight(args.out,args.clearance)
+    if args.mode == "preflight":
+        preflight(args.out,args.clearance)
+    else:
+        collect(args.out)
