@@ -82,7 +82,7 @@ class WideInsertion(Insertion):
         return float(info["success"]), info["success"], timeout, info
 
 
-def expert(env, case, record=None, at_pick=None, *, seat_correction=True):
+def expert(env, case, record=None, at_pick=None, *, seat_correction_rounds=12):
     env.start(case)
     cmd = env.state().astype(float)
     source, target = [env.model.body(n).pos[:2].copy() for n in ("source", "target")]
@@ -129,7 +129,7 @@ def expert(env, case, record=None, at_pick=None, *, seat_correction=True):
     for phase, z, ticks in stages:
         if move(phase, centerline(z) + grasp-tip, -.055, ticks):
             return info
-    if not seat_correction:
+    if seat_correction_rounds == 0:
         env.phase = "hold"
         for _ in range(25):
             if record:
@@ -141,7 +141,7 @@ def expert(env, case, record=None, at_pick=None, *, seat_correction=True):
     # Account for tracking error and allow the 25-tick stable seat to complete.
     setpoint = centerline(env.floor_z+.0005) + grasp-tip
     up = np.array([0.,0.,1.])
-    for _ in range(12):
+    for _ in range(seat_correction_rounds):
         error = centerline(env.floor_z+.0008) - tip
         setpoint += np.clip(error, -.0015, .0015)
         bolt_axis = env.data.body("bolt").xmat.reshape(3,3)[:,2]
