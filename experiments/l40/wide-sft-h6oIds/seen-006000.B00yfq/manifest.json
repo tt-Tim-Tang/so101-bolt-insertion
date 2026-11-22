@@ -1,0 +1,24 @@
+{
+  "checkpoint": "/root/gpufree-data/so101-insertion/outputs/wide-sft-h6oIds/train/checkpoints/006000/pretrained_model",
+  "training_episode_indices": [
+    0,
+    4,
+    8,
+    13,
+    17,
+    21,
+    25,
+    29,
+    34,
+    38,
+    42,
+    46,
+    50,
+    55,
+    59,
+    63
+  ],
+  "case_source": "Successful collection attempts, including resampled successful cells",
+  "batch_size": 4,
+  "execution_steps": 10
+}

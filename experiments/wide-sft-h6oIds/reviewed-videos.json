@@ -1,0 +1,15 @@
+{
+  "episodes": [
+    0,
+    7,
+    27,
+    56,
+    63
+  ],
+  "frames_per_view": 12,
+  "views": [
+    "top",
+    "wrist"
+  ],
+  "finding": "Both fixtures are inside the external view; arm occlusion occurs during movement. The green hole opening and the bolt tip are distinguishable in the wrist view during approach before contact."
+}

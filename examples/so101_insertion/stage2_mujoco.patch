@@ -1,0 +1,288 @@
+--- a/train_rlt_stage2_pi05.py
++++ b/train_rlt_stage2_pi05.py
+@@ -1764,10 +1764,12 @@
+ # Main training loop
+ # ─────────────────────────────────────────────────────────────────────────────
+ 
+-def main():
++def main(simulator=None):
+     global SHUTDOWN, EMERGENCY_STOP, SKIP_EPISODE, FINISH_EPISODE, CRITICAL_PHASE_ACTIVE, HIL_FORCE_RESUME, HIL_TOGGLE_REQUESTED
+     global POSITION_TOGGLE_REQUESTED, POSITIONING_STATE
+     args = parse_args()
++    if simulator is not None:
++        simulator.configure(args)
+     if args.control_fps <= 0:
+         raise ValueError("--control_fps must be positive.")
+     if args.reset_steps < 1:
+@@ -1802,7 +1804,7 @@
+         )
+     if args.delta_weight < 0 or not math.isfinite(args.delta_weight):
+         raise ValueError("--delta_weight must be >= 0 (0 = paper-aligned, no smoothness loss).")
+-    if args.inference_only and not args.resume_from:
++    if args.inference_only and not args.resume_from and not (simulator is not None and simulator.baseline):
+         raise ValueError("--inference_only requires --resume_from (a trained Stage 2 checkpoint to load the actor from).")
+     if args.inference_only and args.vla_only:
+         raise ValueError("--inference_only cannot be combined with --vla_only (nothing to run).")
+@@ -1915,7 +1917,10 @@
+     # Going PI05Config(**config_dict) leaves them as plain dicts and breaks
+     # downstream .image_features / .action_feature; PI05Config.from_pretrained
+     # fails because config.json keeps a "type" field not in the dataclass.
+-    pi05_policy = PI05Policy.from_pretrained(pretrained_name_or_path=args.pi05_path)
++    if simulator is None:
++        pi05_policy = PI05Policy.from_pretrained(pretrained_name_or_path=args.pi05_path)
++    else:
++        pi05_policy = simulator.reference_policy(simulator.load_policy(pi05_path, device), device)
+     pi05_config = pi05_policy.config
+ 
+     from lerobot.configs.types import RTCAttentionSchedule
+@@ -2166,11 +2171,14 @@
+         return tokenized["input_ids"].to(device), tokenized["attention_mask"].to(device).bool()
+ 
+     # ── Validate camera and hardware contracts ──────────────────────────
+-    from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig
+-    from lerobot.robots.so_follower.config_so_follower import SO101FollowerConfig
+-    from lerobot.robots.so_follower.so_follower import SO101Follower
+-    from lerobot.teleoperators.so_leader.config_so_leader import SO101LeaderConfig
+-    from lerobot.teleoperators.so_leader.so_leader import SO101Leader
++    if simulator is None:
++        from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig
++        from lerobot.robots.so_follower.config_so_follower import SO101FollowerConfig
++        from lerobot.robots.so_follower.so_follower import SO101Follower
++        from lerobot.teleoperators.so_leader.config_so_leader import SO101LeaderConfig
++        from lerobot.teleoperators.so_leader.so_leader import SO101Leader
++    else:
++        from types import SimpleNamespace as OpenCVCameraConfig
+ 
+     try:
+         cameras_dict = json.loads(args.cameras)
+@@ -2208,6 +2216,8 @@
+         )
+     logger.info("Physical-to-checkpoint camera map: %s", camera_feature_map)
+ 
++    if simulator is not None:
++        simulator.preflight_complete = True
+     if args.dry_run:
+         logger.info("Dry-run preflight succeeded; no serial ports or cameras were opened.")
+         return
+@@ -2219,7 +2229,7 @@
+ 
+     # ── Connect to SO-101 ──────────────────────────────────────────────
+     logger.info("Connecting to SO-101 arms...")
+-    console = ConsoleInputManager(auto_critical=bool(args.auto_critical))
++    console = simulator if simulator is not None else ConsoleInputManager(auto_critical=bool(args.auto_critical))
+     console.start()
+     follower = None
+     leader = None
+@@ -2227,17 +2237,23 @@
+     leader_connected = False
+     robot_faulted = False
+     try:
+-        follower = SO101Follower(SO101FollowerConfig(
+-            port=args.follower_port,
+-            id=args.follower_id,
+-            cameras=camera_configs,
+-            max_relative_target=max_relative_target,
+-        ))
+-        leader = SO101Leader(SO101LeaderConfig(port=args.leader_port, id=args.leader_id))
+-        follower.connect()
+-        follower_connected = True
+-        leader.connect()
+-        leader_connected = True
++        if simulator is None:
++            follower = SO101Follower(SO101FollowerConfig(
++                port=args.follower_port,
++                id=args.follower_id,
++                cameras=camera_configs,
++                max_relative_target=max_relative_target,
++            ))
++            leader = SO101Leader(SO101LeaderConfig(port=args.leader_port, id=args.leader_id))
++            follower.connect()
++            follower_connected = True
++            leader.connect()
++            leader_connected = True
++        else:
++            follower = simulator
++            follower.connect()
++            follower_connected = True
++            leader = simulator.static_leader
+         logger.info("Both arms connected; follower target delta limit: %s", max_relative_target)
+     except Exception as e:
+         logger.error("Failed to connect to robot: %s", e)
+@@ -2402,6 +2418,8 @@
+ 
+         def reset_follower_to_initial_pose() -> bool:
+             nonlocal robot_faulted
++            if simulator is not None:
++                return True  # MuJoCo resets the arm and object together at episode start.
+             if not args.reset_between_episodes:
+                 logger.info("Reset skipped: --reset_between_episodes is disabled.")
+                 return False
+@@ -2480,6 +2498,7 @@
+         preprocessor, _postprocessor = make_pre_post_processors(
+             pi05_config,
+             pretrained_path=str(pi05_path),
++            **(simulator.processor_overrides(tokenizer_name, device) if simulator is not None else {}),
+         )
+ 
+         def run_pi05_inference(
+@@ -2506,6 +2525,7 @@
+                     raw_obs[k] = v
+             raw_obs["observation.state"] = state_tensor.cpu().numpy()
+-            prepared = prepare_observation_for_inference(raw_obs, device, task=args.task)
++            prepared = (simulator.sft_input(obs, state_tensor) if simulator is not None else
++                        prepare_observation_for_inference(raw_obs, device, task=args.task))
+             processed = preprocessor(prepared)
+ 
+             with torch.no_grad():
+@@ -2548,6 +2568,8 @@
+                     image_only=True,
+                 )
+                 z_rl = encoder(prefix_out.float(), mask=prefix_mask)
++                if simulator is not None and simulator.proprio_only:
++                    z_rl = torch.zeros_like(z_rl)
+ 
+             return raw_actions_full, z_rl
+ 
+@@ -2607,6 +2628,8 @@
+         inference_scores: list[bool] = []  # y/n success counts in inference_only mode (never learned from)
+         total_updates = 0 if resume_checkpoint is None else int(resume_checkpoint["total_updates"])
+         start_episode = 1 if resume_checkpoint is None else int(resume_checkpoint["episode"]) + 1
++        if simulator is not None and (args.inference_only or simulator.operator):
++            args.max_episodes += start_episode - 1  # upstream numbers episodes from the saved checkpoint
+         completed_episode = start_episode - 1
+         # Rolling RL metrics (Q estimates, TD error, ...) for periodic logging.
+         rl_stats: dict[str, list[float]] = {
+@@ -3034,7 +3057,8 @@
+             name="leader-mirror",
+             daemon=True,
+         )
+-        leader_mirror_thread.start()
++        if simulator is None:
++            leader_mirror_thread.start()
+         logger.info("Leader mirror thread started (master mirrors slave at %.0f Hz).", max(args.control_fps, 20.0))
+ 
+         if not EMERGENCY_STOP and not robot_faulted and not args.manual_positioning:
+@@ -3123,6 +3147,8 @@
+                 if debug_dir is not None:
+                     logger.info("Debug observations will be saved to %s", debug_dir)
+ 
++            if simulator is not None:
++                simulator.begin_episode()
+             teleop.reset_episode()
+             SKIP_EPISODE = False  # Reset skip flag at start of episode
+             FINISH_EPISODE = False  # Reset early-finish flag at start of episode
+@@ -3505,6 +3531,17 @@
+             for step in range(max_rollout_blocks):
+                 if SHUTDOWN or EMERGENCY_STOP or SKIP_EPISODE or FINISH_EPISODE:
+                     break
++                if simulator is not None:
++                    CRITICAL_PHASE_ACTIVE |= simulator.env.info()["critical"]
++                    if simulator.operator:
++                        event = simulator.operator.review(CRITICAL_PHASE_ACTIVE, human_active)
++                        if event == "finish" or simulator.done:
++                            FINISH_EPISODE = True
++                            break
++                        if event == "takeover":
++                            HIL_TOGGLE_REQUESTED = True
++                        elif event == "resume":
++                            HIL_FORCE_RESUME = True
+                 step_start = time.time()
+                 takeover.latch(teleop.consume_takeover_request())
+ 
+@@ -3568,7 +3605,9 @@
+                     HIL_FORCE_RESUME = False
+                     HIL_TOGGLE_REQUESTED = False
+                     logger.info("HIL force-resume by operator ('s'/'h' key); exiting human control.")
+-                if human_active and (teleop.consume_resume_request() or force_resume):
++                if human_active and (force_resume or (
++                    not (simulator is not None and simulator.operator) and teleop.consume_resume_request()
++                )):
+                     # Wait for materialization to complete before resuming
+                     if flush_deferred_hil_windows(wait=True):
+                         human_active = False
+@@ -3647,6 +3686,8 @@
+ 
+                     human_actions: list[torch.Tensor] = []
+                     for _ in range(rlt_config.n_action_steps_rl):
++                        if simulator is not None and simulator.done:
++                            break
+                         sample = teleop.wait_for_fresh_sample(
+                             max_age_s=0.25,
+                             after_sequence=takeover.last_leader_sequence,
+@@ -3658,7 +3699,10 @@
+                         try:
+                             # Synchronized HIL: follower tracks leader + takeover
+                             # offset so both arms move together with no jump.
+-                            target_deg = leader_action_to_tensor(sample.action) + hil_offset
++                            if simulator is not None and simulator.operator:
++                                target_deg = torch.as_tensor(simulator.operator.joint_target(), dtype=torch.float32)
++                            else:
++                                target_deg = leader_action_to_tensor(sample.action) + hil_offset
+                         except ValueError as exc:
+                             logger.error("Invalid leader target: %s", exc)
+                             SHUTDOWN = True
+@@ -3683,6 +3727,8 @@
+                         normalized_action = normalize_action(actual_target.to(device))
+                         human_actions.append(normalized_action)
+                         intervention_steps += 1
++                        if simulator is not None and simulator.operator:
++                            simulator.operator.human_steps += 1
+                         if CRITICAL_PHASE_ACTIVE:
+                             if critical_step_counter is None:
+                                 # CRITICAL_PHASE_ACTIVE is toggled by the console
+@@ -3717,6 +3763,9 @@
+                         ))
+                     human_boundary = end_snapshot
+                     source_counts[TransitionSource.HUMAN] += len(human_actions)
++                    if simulator is not None and simulator.done:
++                        FINISH_EPISODE = True
++                        break
+                     continue
+ 
+                 # ── Autonomous boundary inference and execution ──
+@@ -3972,6 +4021,8 @@
+                         residual = (requested_actions - ref_actions).abs().mean().item()
+                         logger.debug("Actor residual correction: %.4f (scale=%.3f)", residual, actor._residual_scale)
+ 
++                if simulator is not None:
++                    simulator.begin_chunk(action_source, CRITICAL_PHASE_ACTIVE)
+                 window = ExecutionWindow(boundary)
+                 takeover_during_chunk = False
+                 # Determine how many steps to execute before re-planning
+@@ -3979,6 +4030,8 @@
+                 if action_source == "ACTOR" and args.actor_execution_steps > 0:
+                     steps_to_execute = min(args.actor_execution_steps, rlt_config.n_action_steps_rl)
+                 for action_offset in range(steps_to_execute):
++                    if simulator is not None and simulator.done:
++                        break
+                     takeover.latch(teleop.consume_takeover_request())
+                     if takeover.pending:
+                         takeover_during_chunk = True
+@@ -4071,6 +4124,8 @@
+                     if remaining_dt > 0:
+                         time.sleep(remaining_dt)
+                     step_start = time.time()
++                if simulator is not None and simulator.done:
++                    FINISH_EPISODE = True
+                 if SHUTDOWN:
+                     break
+                 source_counts[TransitionSource(current_source)] += window.executed_steps
+@@ -4375,7 +4430,8 @@
+             training_thread = None
+ 
+         leader_mirror_stop.set()
+-        leader_mirror_thread.join(timeout=2.0)
++        if leader_mirror_thread.is_alive():
++            leader_mirror_thread.join(timeout=2.0)
+ 
+         teleop.stop()
+         if leader_connected:
+@@ -4459,7 +4515,7 @@
+                 logger.warning("Teleop cleanup failed: %s", exc)
+         if leader_mirror_stop is not None:
+             leader_mirror_stop.set()
+-            if leader_mirror_thread is not None:
++            if leader_mirror_thread is not None and leader_mirror_thread.is_alive():
+                 try:
+                     leader_mirror_thread.join(timeout=2.0)
+                 except Exception as exc:

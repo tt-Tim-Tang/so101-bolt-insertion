@@ -1,0 +1,21 @@
+{
+  "gpu": "NVIDIA L40",
+  "micro_bs": 16,
+  "grad_accum": 2,
+  "effective_bs": 32,
+  "updates": 20,
+  "samples": 640,
+  "wall_seconds": 212.0700339289615,
+  "mean_update_seconds": 10.603501696448074,
+  "median_update_seconds": 10.686405355052557,
+  "range_update_seconds": [
+    10.100442172028124,
+    10.89868181804195
+  ],
+  "samples_per_second": 3.017870974710105,
+  "allocated_gib": 39.126741886138916,
+  "reserved_gib": 42.28125,
+  "gpu_used_mib": 43959,
+  "estimated_train_hours": 17.672502827413457,
+  "estimated_eval_minutes": 32.3
+}

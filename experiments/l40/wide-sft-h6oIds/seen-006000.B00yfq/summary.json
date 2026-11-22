@@ -1,0 +1,29 @@
+{
+  "checkpoint_step": 6000,
+  "seen": {
+    "episodes": 16,
+    "pickup": 0,
+    "arrival": 0,
+    "alignment": 0,
+    "success": 0
+  },
+  "heldout": {
+    "episodes": 30,
+    "pickup": 0,
+    "arrival": 0,
+    "alignment": 0,
+    "success": 0
+  },
+  "max_lift_at_jaws_mm": {
+    "episodes_measured": 16,
+    "median": 0.0
+  },
+  "closest_at_head_height_mm": {
+    "episodes_measured": 16,
+    "median": 45.542377735456206
+  },
+  "closest_while_closing_mm": {
+    "episodes_measured": 6,
+    "median": 26.813074426778037
+  }
+}
