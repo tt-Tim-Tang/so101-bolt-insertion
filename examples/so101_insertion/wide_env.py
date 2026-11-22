@@ -6,8 +6,8 @@ from .scene import HOME, MOUTH_Z, SHAFT_RADIUS, SOURCE, TARGET, Insertion
 
 
 class WideInsertion(Insertion):
-    def __init__(self):
-        super().__init__(max_steps=1000, control_fps=50, target_bore_radius=.006, show_target_colliders=True)
+    def __init__(self, *, target_bore_radius=.006):
+        super().__init__(max_steps=1000, control_fps=50, target_bore_radius=target_bore_radius, show_target_colliders=True)
         ids = np.flatnonzero(self.model.geom_bodyid == self.model.body("target").id)
         self.walls, self.floor = ids[:-1], ids[-1]
         self.model.opt.timestep = .002
@@ -19,7 +19,7 @@ class WideInsertion(Insertion):
         centers = self.model.geom_pos[self.walls, :2]
         self.normals = centers / np.linalg.norm(centers, axis=1)[:, None]
         self.faces = np.linalg.norm(centers, axis=1) - self.model.geom_size[self.walls, 0]
-        assert len(ids) == 17 and np.allclose(self.faces, .006) and np.isclose(self.floor_z, .013)
+        assert len(ids) == 17 and np.allclose(self.faces, target_bore_radius) and np.isclose(self.floor_z, .013)
 
     def start(self, case):
         mujoco.mj_resetData(self.model, self.data)
@@ -82,7 +82,7 @@ class WideInsertion(Insertion):
         return float(info["success"]), info["success"], timeout, info
 
 
-def expert(env, case, record=None, at_pick=None):
+def expert(env, case, record=None, at_pick=None, *, seat_correction=True):
     env.start(case)
     cmd = env.state().astype(float)
     source, target = [env.model.body(n).pos[:2].copy() for n in ("source", "target")]
@@ -129,6 +129,15 @@ def expert(env, case, record=None, at_pick=None):
     for phase, z, ticks in stages:
         if move(phase, centerline(z) + grasp-tip, -.055, ticks):
             return info
+    if not seat_correction:
+        env.phase = "hold"
+        for _ in range(25):
+            if record:
+                record(cmd.astype(np.float32))
+            _, done, timeout, info = env.step(cmd)
+            if done or timeout:
+                return info
+        return dict(info, reason="seat" if env.arrive else "approach")
     # Account for tracking error and allow the 25-tick stable seat to complete.
     setpoint = centerline(env.floor_z+.0005) + grasp-tip
     up = np.array([0.,0.,1.])

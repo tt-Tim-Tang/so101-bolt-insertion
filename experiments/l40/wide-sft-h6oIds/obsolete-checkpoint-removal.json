@@ -1,0 +1,10 @@
+[
+  {
+    "path": "/root/gpufree-data/so101-insertion/outputs/wide-sft-h6oIds/b32-stage.Hnm4AC/state-1000.tar.zst",
+    "bytes": 10458929399
+  },
+  {
+    "path": "/root/gpufree-data/so101-insertion/outputs/wide-sft-h6oIds/b32-stage.Hnm4AC/train/checkpoints/002000/pretrained_model/model.safetensors",
+    "bytes": 9354050784
+  }
+]
