@@ -1,4 +1,4 @@
-"""Small new-camera verification with a frozen 16/10 split and no seating corrections."""
+"""Small new-camera verification with a frozen 16/10 split and bounded seating corrections."""
 import argparse
 import json
 from itertools import product
@@ -23,7 +23,7 @@ def preflight(root, clearance):
     (root/"splits.json").write_text(json.dumps(cases, indent=2))
     env = WideInsertion(target_bore_radius=.005 + clearance/1000)
     (root/"environment.json").write_text(json.dumps(dict(clearance_mm=clearance,correction_rounds=3,
-        source_jitter_mm=0,target_range_mm=18,control_hz=50,stable_ticks=25),indent=2))
+        source_jitter_mm=0,target_range_mm=18,control_hz=50,stable_ticks=25,seat_hold_ticks=25),indent=2))
     try:
         with (root/"expert-check.jsonl").open("x", buffering=1) as log:
             for group, group_cases in cases.items():
@@ -32,7 +32,7 @@ def preflight(root, clearance):
                         counts = {}
                         def record(action):
                             counts[env.phase] = counts.get(env.phase, 0) + 1
-                        result = expert(env, case, record=record, seat_correction_rounds=3)
+                        result = expert(env, case, record=record, seat_correction_rounds=3, seat_hold_ticks=25)
                     except RuntimeError as exc:
                         result = dict(success=False, pickup=env.pick, arrival=env.arrive, error=str(exc))
                     print(json.dumps(dict(group=group,index=i,steps=env.steps,case=case,phase_frames=counts,**result)),file=log)

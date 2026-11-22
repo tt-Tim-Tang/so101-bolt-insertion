@@ -82,7 +82,7 @@ class WideInsertion(Insertion):
         return float(info["success"]), info["success"], timeout, info
 
 
-def expert(env, case, record=None, at_pick=None, *, seat_correction_rounds=12):
+def expert(env, case, record=None, at_pick=None, *, seat_correction_rounds=12, seat_hold_ticks=0):
     env.start(case)
     cmd = env.state().astype(float)
     source, target = [env.model.body(n).pos[:2].copy() for n in ("source", "target")]
@@ -149,4 +149,10 @@ def expert(env, case, record=None, at_pick=None, *, seat_correction_rounds=12):
         up /= np.linalg.norm(up)
         if move("seat", setpoint, -.055, 35, up):
             return info
+        for _ in range(seat_hold_ticks):
+            if record:
+                record(cmd.astype(np.float32))
+            _, done, timeout, info = env.step(cmd)
+            if done or timeout:
+                return info
     return dict(info, reason="seat" if env.arrive else "approach")
