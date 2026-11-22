@@ -1,0 +1,37 @@
+{
+  "action": "6 absolute joint positions, radians, gripper last",
+  "control_hz": 50,
+  "demonstration_hz": 50,
+  "chunk_executed": 10,
+  "episode_ticks": 1000,
+  "physics_dt": 0.002,
+  "shaft_radius_mm": 5,
+  "hole_apothem_mm": 6,
+  "straight_walls": 16,
+  "chamfer": false,
+  "floor_top_mm": 13,
+  "mouth_mm": 45,
+  "target_appearance": "rendered collision geoms",
+  "friction": "unchanged from scene.py",
+  "stable_ticks": 25,
+  "seat": "bottom rim gap [-0.2,2] mm; shaft cross sections within all bore faces; tilt < 0.10 rad",
+  "initial_arm_jitter_rad": 0.05,
+  "source_xy_mm": [
+    190.0,
+    -57.0
+  ],
+  "target_xy_mm": [
+    190.0,
+    57.0
+  ],
+  "target_contact_solref_time_s": 0.006,
+  "target_contact_solmix": 50,
+  "phase": "SFT baseline",
+  "init_checkpoint": "/root/so101-pi05-base",
+  "optimizer_peak_lr": 2.5e-05,
+  "warmup_steps": 100,
+  "cosine_decay_steps": 6000,
+  "decay_lr": 1e-05,
+  "optimizer_batch_size": 1,
+  "eval_batch_size": 4
+}
