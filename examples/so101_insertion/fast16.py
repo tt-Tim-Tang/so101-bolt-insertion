@@ -1,4 +1,4 @@
-"""Small new-camera verification with a frozen 16/10 split and bounded seating corrections."""
+"""Small new-camera verification with a frozen 16/10 split and continuous insertion."""
 import argparse
 import json
 from itertools import product
@@ -47,7 +47,7 @@ def collect(root):
                 def record(action):
                     frames.append(dict(**env.observation(), action=action.copy()))
                     counts[env.phase] = counts.get(env.phase, 0)+1
-                result = expert(env, case, record=record, seat_correction_rounds=3, seat_hold_ticks=25)
+                result = expert(env, case, record=record)
                 row = dict(index=i, case=case, frames=len(frames), phase_frames=counts, **result)
                 print(json.dumps(row), file=log)
                 if not result["success"]:
@@ -69,7 +69,7 @@ def collect(root):
                 print(json.dumps(dict(index=i, case=case, steps=env.steps, **info)), file=log)
         total = sum(r["frames"] for r in rows)
         near = sum(sum(n for phase,n in r["phase_frames"].items()
-                       if phase in ("slow_approach","prealign","align","insert","seat")) for r in rows)
+                       if phase in ("air_align","insert","hold")) for r in rows)
         summary = dict(episodes=len(rows), frames=total, mean_frames=total/len(rows), hole_phase_fraction=near/total)
         (root/"dataset-summary.json").write_text(json.dumps(summary, indent=2))
         print("DATASET", summary, flush=True)
@@ -91,8 +91,9 @@ def preflight(root, clearance):
     cases = make_cases()
     (root/"splits.json").write_text(json.dumps(cases, indent=2))
     env = WideInsertion(target_bore_radius=.005 + clearance/1000)
-    (root/"environment.json").write_text(json.dumps(dict(clearance_mm=clearance,correction_rounds=3,
-        source_jitter_mm=0,target_range_mm=18,control_hz=50,stable_ticks=25,seat_hold_ticks=25),indent=2))
+    (root/"environment.json").write_text(json.dumps(dict(clearance_mm=clearance,
+        source_jitter_mm=0,target_range_mm=18,control_hz=50,stable_ticks=25,
+        insertion_tick_limit=100,descent_ticks=65,expert="tip_offset_continuous_xy"),indent=2))
     try:
         with (root/"expert-check.jsonl").open("x", buffering=1) as log:
             for group, group_cases in cases.items():
@@ -101,7 +102,7 @@ def preflight(root, clearance):
                         counts = {}
                         def record(action):
                             counts[env.phase] = counts.get(env.phase, 0) + 1
-                        result = expert(env, case, record=record, seat_correction_rounds=3, seat_hold_ticks=25)
+                        result = expert(env, case, record=record)
                     except RuntimeError as exc:
                         result = dict(success=False, pickup=env.pick, arrival=env.arrive, error=str(exc))
                     print(json.dumps(dict(group=group,index=i,steps=env.steps,case=case,phase_frames=counts,**result)),file=log)

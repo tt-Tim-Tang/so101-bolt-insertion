@@ -82,7 +82,7 @@ class WideInsertion(Insertion):
         return float(info["success"]), info["success"], timeout, info
 
 
-def expert(env, case, record=None, at_pick=None, *, seat_correction_rounds=12, seat_hold_ticks=0):
+def expert(env, case, record=None, at_pick=None):
     env.start(case)
     cmd = env.state().astype(float)
     source, target = [env.model.body(n).pos[:2].copy() for n in ("source", "target")]
@@ -117,42 +117,39 @@ def expert(env, case, record=None, at_pick=None, *, seat_correction_rounds=12, s
         return dict(info, reason="pickup")
     if at_pick:
         at_pick(env)
-    grasp = env.data.site("grasp").xpos
-    tip = env.data.body("bolt").xpos
-    stages = [("transfer", MOUTH_Z+.030, 64), ("slow_approach", MOUTH_Z+.014, 34),
-              ("prealign", MOUTH_Z+.006, 34), ("align", MOUTH_Z+.003, 34),
-              ("insert", env.floor_z+.0005, 78)]
-    def centerline(z):
-        axis = env.data.body("bolt").xmat.reshape(3,3)[:,2]
-        return np.r_[target - max(MOUTH_Z-z,0)*.5*axis[:2]/max(axis[2],.5), z]
+    # The bolt body origin is the shaft tip; compensate its measured TCP offset.
+    def tip_offset():
+        return env.data.body("bolt").xpos - env.data.site("grasp").xpos
 
-    for phase, z, ticks in stages:
-        if move(phase, centerline(z) + grasp-tip, -.055, ticks):
+    if move("transfer", np.r_[target, MOUTH_Z+.030]-tip_offset(), -.055, 64):
+        return info
+    xy_correction = np.zeros(2)
+
+    def track_tip(z):
+        nonlocal cmd, info
+        tip = env.data.body("bolt").xpos
+        xy_correction[:] = np.clip(xy_correction + np.clip(.2*(target-tip[:2]), -.0001, .0001),
+                                   -.002, .002)
+        point = np.r_[target+xy_correction, z]-tip_offset()
+        cmd = env.inverse_kinematics(point, cmd)
+        cmd[-1] = -.055
+        action = cmd.astype(np.float32)
+        if record:
+            record(action)
+        _, done, timeout, info = env.step(action)
+        return done or timeout
+
+    env.phase = "air_align"
+    start_z = float(env.data.body("bolt").xpos[2])
+    for tick in range(1, 51):
+        f = tick/50
+        z = start_z + (MOUTH_Z+.005-start_z)*(f*f*(3-2*f))
+        if track_tip(z):
             return info
-    if seat_correction_rounds == 0:
-        env.phase = "hold"
-        for _ in range(25):
-            if record:
-                record(cmd.astype(np.float32))
-            _, done, timeout, info = env.step(cmd)
-            if done or timeout:
-                return info
-        return dict(info, reason="seat" if env.arrive else "approach")
-    # Account for tracking error and allow the 25-tick stable seat to complete.
-    setpoint = centerline(env.floor_z+.0005) + grasp-tip
-    up = np.array([0.,0.,1.])
-    for _ in range(seat_correction_rounds):
-        error = centerline(env.floor_z+.0008) - tip
-        setpoint += np.clip(error, -.0015, .0015)
-        bolt_axis = env.data.body("bolt").xmat.reshape(3,3)[:,2]
-        up[:2] = np.clip(up[:2] - .45*bolt_axis[:2], -.10, .10)
-        up /= np.linalg.norm(up)
-        if move("seat", setpoint, -.055, 35, up):
+    # 65 constant-speed descent ticks plus at most 35 settling ticks: 100 total.
+    for tick in range(1, 101):
+        env.phase = "insert" if tick <= 65 else "hold"
+        z = MOUTH_Z+.005 + (env.floor_z+.0005-MOUTH_Z-.005)*min(tick/65, 1)
+        if track_tip(z):
             return info
-        for _ in range(seat_hold_ticks):
-            if record:
-                record(cmd.astype(np.float32))
-            _, done, timeout, info = env.step(cmd)
-            if done or timeout:
-                return info
-    return dict(info, reason="seat" if env.arrive else "approach")
+    return dict(info, reason="insertion_100_tick_limit")
