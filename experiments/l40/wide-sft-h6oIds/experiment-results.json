@@ -1,0 +1,212 @@
+{
+  "date": "2026-11-22",
+  "dataset": {
+    "demonstrations": 64,
+    "attempts": 67,
+    "frames": 32271,
+    "fps": 50,
+    "source_range_mm_each_axis": 20,
+    "target_range_mm_each_axis": 40,
+    "selection": 2000,
+    "collection_failures": {
+      "seat": 3
+    },
+    "audit_first_attempt": 98,
+    "audit_including_joint_reset_retries": 101,
+    "audit_cases": 101
+  },
+  "batch32_training": {
+    "batch_size": 16,
+    "accumulation": 2,
+    "effective_batch_size": 32,
+    "optimizer_updates": 1000,
+    "sampled_windows": 32000,
+    "approximate_passes": 0.9916023674506523,
+    "optimizer_peak_lr": 5e-05,
+    "last_lr": 4.4142135623730954e-05,
+    "last_logged_update_loss": 0.00320537225343287,
+    "log": "b32-stage.Hnm4AC/train.log",
+    "configuration": "b32-stage.Hnm4AC/train-config.json"
+  },
+  "rollouts": [
+    {
+      "experiment": "脚本专家",
+      "split": "验证",
+      "records": "expert-validation.jsonl",
+      "episodes": 30,
+      "pickup": 30,
+      "arrival": 30,
+      "alignment": 30,
+      "success": 27
+    },
+    {
+      "experiment": "固定动作回放",
+      "split": "验证",
+      "records": "fixed-validation.jsonl",
+      "episodes": 30,
+      "pickup": 6,
+      "arrival": 0,
+      "alignment": 0,
+      "success": 0
+    },
+    {
+      "experiment": "脚本抓稳后固定回放",
+      "split": "验证",
+      "records": "fixed-validation.jsonl",
+      "episodes": 30,
+      "pickup": 30,
+      "arrival": 1,
+      "alignment": 0,
+      "success": 0
+    },
+    {
+      "experiment": "Batch 1 · 2,000 步",
+      "split": "验证",
+      "records": "validation-2000.jsonl",
+      "episodes": 30,
+      "pickup": 1,
+      "arrival": 0,
+      "alignment": 0,
+      "success": 0
+    },
+    {
+      "experiment": "Batch 1 · 4,000 步",
+      "split": "验证",
+      "records": "validation-4000.jsonl",
+      "episodes": 30,
+      "pickup": 1,
+      "arrival": 0,
+      "alignment": 0,
+      "success": 0
+    },
+    {
+      "experiment": "Batch 1 · 6,000 步",
+      "split": "验证",
+      "records": "validation-6000.jsonl",
+      "episodes": 30,
+      "pickup": 0,
+      "arrival": 0,
+      "alignment": 0,
+      "success": 0
+    },
+    {
+      "experiment": "Batch 1 · 2,000 步",
+      "split": "已见",
+      "records": "diagnose-seen.jsonl",
+      "episodes": 16,
+      "pickup": 0,
+      "arrival": 0,
+      "alignment": 0,
+      "success": 0
+    },
+    {
+      "experiment": "Batch 1 · 6,000 步",
+      "split": "已见",
+      "records": "seen-006000.B00yfq/episodes.jsonl",
+      "episodes": 16,
+      "pickup": 0,
+      "arrival": 0,
+      "alignment": 0,
+      "success": 0
+    },
+    {
+      "experiment": "Batch 1 · 2,000 步",
+      "split": "最终测试",
+      "records": "final-test.jsonl",
+      "episodes": 50,
+      "pickup": 1,
+      "arrival": 0,
+      "alignment": 0,
+      "success": 0
+    },
+    {
+      "experiment": "Batch 32 · 1,000 次更新",
+      "split": "已见",
+      "records": "b32-stage.Hnm4AC/seen-1000.jsonl",
+      "episodes": 16,
+      "pickup": 2,
+      "arrival": 0,
+      "alignment": 0,
+      "success": 0
+    },
+    {
+      "experiment": "Batch 32 · 1,000 次更新",
+      "split": "验证",
+      "records": "b32-stage.Hnm4AC/validation-1000.jsonl",
+      "episodes": 30,
+      "pickup": 4,
+      "arrival": 0,
+      "alignment": 0,
+      "success": 0
+    }
+  ],
+  "diagnostics": {
+    "roundtrip": {
+      "checked_frames": 30,
+      "state_max_rad": 0.0,
+      "top_max_abs_pixel": 0.0,
+      "wrist_max_abs_pixel": 1.0
+    },
+    "closed_loop_grasp": [
+      {
+        "records": "diagnose-seen.jsonl",
+        "episodes": 16,
+        "pickup": 0,
+        "closing_measured": 14,
+        "closing_xy_median_mm": 33.06742150284164
+      },
+      {
+        "records": "diagnose-validation.jsonl",
+        "episodes": 30,
+        "pickup": 1,
+        "closing_measured": 25,
+        "closing_xy_median_mm": 40.8525431384779
+      },
+      {
+        "records": "diagnose-single.jsonl",
+        "episodes": 8,
+        "pickup": 0,
+        "closing_measured": 8,
+        "closing_xy_median_mm": 82.56775607585024
+      },
+      {
+        "records": "seen-006000.B00yfq/episodes.jsonl",
+        "episodes": 16,
+        "pickup": 0,
+        "closing_measured": 6,
+        "closing_xy_median_mm": 26.813074426778037
+      }
+    ],
+    "takeover": {
+      "records": "quick-grasp.XHTyan/takeover.jsonl",
+      "modes": {
+        "expert": {
+          "pickup": 8,
+          "episodes": 8
+        },
+        "expert_arm": {
+          "pickup": 8,
+          "episodes": 8
+        },
+        "expert_grip": {
+          "pickup": 4,
+          "episodes": 8
+        },
+        "model": {
+          "pickup": 3,
+          "episodes": 8
+        }
+      }
+    },
+    "hole_image_intervention": {
+      "available": 30,
+      "positive": 30,
+      "median_signed_mm": 3.669313855368155
+    }
+  },
+  "rl_gate": {
+    "pickup": 0.95,
+    "arrival": 0.9,
+    "met": false
+  }
+}
