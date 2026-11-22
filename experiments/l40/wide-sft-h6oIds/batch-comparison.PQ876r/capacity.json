@@ -1,0 +1,16 @@
+[
+  {
+    "physical": 32,
+    "fits": false,
+    "error": "CUDA out of memory. Tried to allocate 36.00 MiB. GPU 0 has a total capacity of 44.39 GiB of which 42.44 MiB is free. Process 2746278 has 44.21 GiB memory in use. Of the allocated m"
+  },
+  {
+    "physical": 16,
+    "fits": true,
+    "seconds": [
+      5.200467294896953,
+      5.101416793069802
+    ],
+    "peak_gib": 37.5903902053833
+  }
+]
