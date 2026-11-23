@@ -246,6 +246,7 @@ def run(args):
             peak_reserved_gib=peak_reserved, peak_allocated_gib=peak_allocated, update_seconds=times,
             first_loss=update_losses[0], last_loss=update_losses[-1],
         )
+        output.mkdir(parents=True, exist_ok=True)
         (output / "speed.json").write_text(json.dumps(result, indent=2))
         print("SMOL_SPEED_RESULT", json.dumps(result), flush=True)
     if args.benchmark:
