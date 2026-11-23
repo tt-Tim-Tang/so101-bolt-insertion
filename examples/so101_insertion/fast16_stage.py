@@ -24,6 +24,26 @@ def train(root, run, scratch, target, resume=None):
         args = [arg for arg in args if not arg.startswith(("--steps=", "--save_checkpoint=", "--output_dir="))]
         args.append(f"--output_dir={run / 'train'}")
     else:
+        from diffusers.training_utils import EMAModel
+
+        load_ema = EMAModel.load_state_dict
+
+        @torch.no_grad()
+        def restore_ema(ema, state):
+            # diffusers deep-copies the entire state, which needs a third L40-sized
+            # set of EMA weights. Reuse the allocated shadow for the large tensors.
+            metadata = state.copy()
+            saved = metadata.pop("shadow_params")
+            load_ema(ema, metadata)
+            for destination, source in zip(ema.shadow_params, saved, strict=True):
+                if destination.shape != source.shape or destination.dtype != source.dtype:
+                    raise ValueError("EMA checkpoint tensor mismatch")
+                destination.copy_(source)
+                if not torch.equal(destination, source):
+                    raise ValueError("EMA checkpoint restore mismatch")
+            assert ema.optimization_step == completed
+
+        EMAModel.load_state_dict = restore_ema
         metadata = json.loads((resume / "training_state/training_step.json").read_text())
         assert metadata["grad_accum_steps"] == accum and metadata["batch_size"] == 8
         completed = metadata["step"] // accum
