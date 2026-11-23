@@ -117,7 +117,7 @@ class WideInsertion(Insertion):
         return float(info["success"]), info["success"], timeout, info
 
 
-def expert(env, case, record=None, at_pick=None):
+def expert(env, case, record=None, at_pick=None, *, seat_offset=.0005, insertion_seconds=2.):
     env.start(case)
     cmd = env.state().astype(float)
     source, target = [env.model.body(n).pos[:2].copy() for n in ("source", "target")]
@@ -189,12 +189,12 @@ def expert(env, case, record=None, at_pick=None):
         axis = (1-blend)*start_axis + blend*np.array([0., 0., 1.])
         if track_tip(z, axis/np.linalg.norm(axis)):
             return info
-    # 1.3 seconds of descent, followed by settling for the remainder of the 2 seconds.
+    # 1.3 seconds of descent, then settle for the rest of the insertion window.
     descent_ticks = ceil(65 / scale)
-    insertion_ticks = ceil(100 / scale)
+    insertion_ticks = ceil(insertion_seconds * env.control_fps)
     for tick in range(1, insertion_ticks + 1):
         env.phase = "insert" if tick <= descent_ticks else "hold"
-        z = MOUTH_Z+.005 + (env.floor_z+.0005-MOUTH_Z-.005)*min(tick / descent_ticks, 1)
+        z = MOUTH_Z+.005 + (env.floor_z+seat_offset-MOUTH_Z-.005)*min(tick / descent_ticks, 1)
         if track_tip(z):
             return info
     return dict(info, reason=f"insertion_{insertion_ticks}_tick_limit")
