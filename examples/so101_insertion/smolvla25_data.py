@@ -20,6 +20,7 @@ MAX_PENETRATION_M = .001
 DEPTH_TOLERANCE_M = .002
 MIN_AXIS_Z = cos(radians(12))
 REPO_ID = "local/so101_smolvla25"
+VALIDATION_REPO_ID = "local/so101_smolvla25_validation"
 CAMERAS = ("observation.images.top", "observation.images.wrist")
 EVAL_TRAIN_INDICES = [10 * x + y for x, y in product((0, 3, 6, 9), repeat=2)]
 CORNER_INDICES = {0, 9, 90, 99}
@@ -151,24 +152,38 @@ def gate(root):
     return live_success >= 4 and replay_success >= 4
 
 
-def collect(root):
+def create_dataset(path, repo_id):
     from lerobot.configs import RGBEncoderConfig
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
+    features = {key: dict(dtype="float32", shape=(6,), names=list(JOINTS))
+                for key in ("observation.state", "action")}
+    features.update({key: dict(dtype="video", shape=(IMAGE_SIZE, IMAGE_SIZE, 3),
+                               names=["height", "width", "channel"]) for key in CAMERAS})
+    return LeRobotDataset.create(repo_id=repo_id, root=path, fps=FPS,
+                                 robot_type="so101_mujoco", features=features, use_videos=True,
+                                 rgb_encoder=RGBEncoderConfig(vcodec="h264"), video_backend="pyav",
+                                 streaming_encoding=True, encoder_threads=2)
+
+
+def record_trial(env, case):
+    frames = []
+
+    def record(action):
+        frames.append(dict(**env.observation(), action=np.clip(action, env.low, env.high).astype(np.float32)))
+
+    result = trial(env, case, record)
+    return frames, result
+
+
+def collect(root):
     accepted = json.loads((root / "gate.json").read_text(encoding="utf-8"))
     if min(accepted["live_success"], accepted["replay_success"]) < accepted["required"]:
         raise RuntimeError("25 Hz expert gate failed")
     rng = np.random.default_rng(519307)
     grid = np.linspace(-TARGET_RANGE_MM, TARGET_RANGE_MM, 10)
     edges = np.r_[grid[0], (grid[1:] + grid[:-1]) / 2, grid[-1]]
-    features = {key: dict(dtype="float32", shape=(6,), names=list(JOINTS))
-                for key in ("observation.state", "action")}
-    features.update({key: dict(dtype="video", shape=(IMAGE_SIZE, IMAGE_SIZE, 3),
-                               names=["height", "width", "channel"]) for key in CAMERAS})
-    dataset = LeRobotDataset.create(repo_id=REPO_ID, root=root / "dataset", fps=FPS,
-                                    robot_type="so101_mujoco", features=features, use_videos=True,
-                                    rgb_encoder=RGBEncoderConfig(vcodec="h264"), video_backend="pyav",
-                                    streaming_encoding=True, encoder_threads=2)
+    dataset = create_dataset(root / "dataset", REPO_ID)
     env = SmolVLAInsertion()
     cases = []
     lengths = []
@@ -178,13 +193,8 @@ def collect(root):
             for x, y in product(range(10), repeat=2):
                 lower, upper = edges[[x, y]], edges[[x + 1, y + 1]]
                 for target in ([grid[x], grid[y]], *rng.uniform(lower, upper, size=(49, 2))):
-                    frames = []
                     case = make_case(target, rng)
-
-                    def record(action):
-                        frames.append(dict(**env.observation(), action=np.clip(action, env.low, env.high).astype(np.float32)))
-
-                    result = trial(env, case, record)
+                    frames, result = record_trial(env, case)
                     print(json.dumps(dict(cell=[x, y], frames=len(frames), **result)), file=log)
                     if not (result["success"] and result["clock_ok"] and result["finite"]):
                         continue
@@ -211,16 +221,46 @@ def collect(root):
     print(json.dumps(summary), flush=True)
 
 
+def collect_validation(root):
+    splits = json.loads((root / "splits.json").read_text(encoding="utf-8"))
+    cases = splits["validation"]
+    train_positions = {tuple(case["target"]) for case in splits["train"]}
+    if len(cases) != 10 or len({tuple(case["target"]) for case in cases} - train_positions) != len(cases):
+        raise RuntimeError("Expected ten distinct, unseen validation target positions")
+    dataset = create_dataset(root / "validation-dataset", VALIDATION_REPO_ID)
+    env = SmolVLAInsertion()
+    total_frames = 0
+    try:
+        with (root / "validation-collection.jsonl").open("x", encoding="utf-8", buffering=1) as log:
+            for index, case in enumerate(cases):
+                frames, result = record_trial(env, case)
+                print(json.dumps(dict(index=index, frames=len(frames), **result)), file=log)
+                if not (result["success"] and result["clock_ok"] and result["finite"]):
+                    raise RuntimeError(f"Expert failed on validation case {index}: {result}")
+                for frame in frames:
+                    dataset.add_frame(frame)
+                dataset.save_episode()
+                total_frames += len(frames)
+    finally:
+        dataset.finalize()
+        env.close()
+    summary = dict(episodes=len(cases), frames=total_frames, fps=FPS, repo_id=VALIDATION_REPO_ID)
+    (root / "validation-summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    print("SMOL_VALIDATION_DATA", json.dumps(summary), flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("stage", choices=("gate", "collect"))
+    parser.add_argument("stage", choices=("gate", "collect", "validation"))
     parser.add_argument("out", type=Path)
     args = parser.parse_args()
     if args.stage == "gate":
         if not gate(args.out):
             raise SystemExit(1)
-    else:
+    elif args.stage == "collect":
         collect(args.out)
+    else:
+        collect_validation(args.out)
 
 
 if __name__ == "__main__":
