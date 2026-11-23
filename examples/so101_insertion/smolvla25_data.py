@@ -16,7 +16,8 @@ from .wide_env import WideInsertion, expert
 FPS = 25
 BORE_RADIUS = .0057
 TARGET_RANGE_MM = 18
-MAX_PENETRATION_M = .001
+MAX_FLOOR_OVERRUN_M = .001
+DEFAULT_PENETRATION_MM = 1.0
 DEPTH_TOLERANCE_M = .002
 MIN_AXIS_Z = cos(radians(12))
 REPO_ID = "local/so101_smolvla25"
@@ -29,8 +30,9 @@ CORNER_INDICES = {0, 9, 90, 99}
 class SmolVLAInsertion(WideInsertion):
     ik_axis_tolerance = .015
 
-    def __init__(self):
+    def __init__(self, *, penetration_limit_mm=DEFAULT_PENETRATION_MM):
         super().__init__(target_bore_radius=BORE_RADIUS, control_fps=FPS)
+        self.penetration_limit_m = penetration_limit_mm / 1000
         self.success_steps = ceil(.2 / self.model.opt.timestep)
         self.bolt_id = self.model.body("bolt").id
         self.target_id = self.model.body("target").id
@@ -54,7 +56,7 @@ class SmolVLAInsertion(WideInsertion):
         inside = False
         if tip[2] < MOUTH_Z and axis[2] >= MIN_AXIS_Z:
             gap = tip[2] - SHAFT_RADIUS * np.linalg.norm(axis[:2]) - self.floor_z
-            if -MAX_PENETRATION_M <= gap <= DEPTH_TOLERANCE_M:
+            if -MAX_FLOOR_OVERRUN_M <= gap <= DEPTH_TOLERANCE_M:
                 at_mouth = xy + (MOUTH_Z - tip[2]) * axis[:2] / axis[2]
                 inside = np.all(np.maximum(self.normals @ xy, self.normals @ at_mouth) <= self.faces)
         self.seated_ticks = self.seated_ticks + 1 if inside else 0
@@ -84,7 +86,7 @@ class SmolVLAInsertion(WideInsertion):
         self.pick |= self.held_ticks >= ceil(.4 * FPS)
         approach = self.pick and jaws and 0 <= -info["insertion_depth_m"] <= .010 and info["tilt_rad"] <= .15
         self.arrive |= approach and info["radial_error_m"] <= .005
-        penetration = self.max_penetration > MAX_PENETRATION_M
+        penetration = self.max_penetration > self.penetration_limit_m
         success = self.max_streak >= self.success_steps and not penetration
         self.highest_lift = max(self.highest_lift, lift)
         opened = bool(self.pick and not success and self.data.ctrl[-1] > .15)

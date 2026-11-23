@@ -8,13 +8,22 @@ import shutil
 import sys
 import time
 from collections import deque
+from contextlib import nullcontext
 from copy import copy
 from itertools import islice
 from pathlib import Path
 
 import numpy as np
 
-from .smolvla25_data import CAMERAS, CORNER_INDICES, FPS, REPO_ID, VALIDATION_REPO_ID, SmolVLAInsertion
+from .smolvla25_data import (
+    CAMERAS,
+    CORNER_INDICES,
+    DEFAULT_PENETRATION_MM,
+    FPS,
+    REPO_ID,
+    VALIDATION_REPO_ID,
+    SmolVLAInsertion,
+)
 
 
 TOTAL_UPDATES = 15_000
@@ -23,6 +32,7 @@ EVAL_EVERY = 5_000
 BENCHMARK_UPDATES = 20
 CAMERA_MAP = {key: f"observation.images.camera{i}" for i, key in enumerate(CAMERAS, 1)}
 VALIDATION_SEED = 271828
+ROLLOUT_SEED = 714290
 
 
 def validation_loader(root, policy_config, backend, batch_size, workers):
@@ -118,22 +128,26 @@ def save_curves(output):
     figure_temp.replace(output / "curves.png")
 
 
-def evaluate(policy, preprocessor, postprocessor, splits, destination, *, smoke=False):
+def evaluate(policy, preprocessor, postprocessor, splits, destination, *, smoke=False,
+             penetration_limit_mm=DEFAULT_PENETRATION_MM, rollout_seed=None):
     import cv2
     import torch
 
     destination.mkdir(exist_ok=False)
-    env = SmolVLAInsertion()
+    env = SmolVLAInsertion(penetration_limit_mm=penetration_limit_mm)
     summary = {}
     groups = {"train": [0]} if smoke else {"train": splits["eval_train_indices"],
                                           "validation": range(len(splits["validation"]))}
     policy.eval()
+    rng = torch.random.fork_rng(devices=[torch.cuda.current_device()]) if rollout_seed is not None else nullcontext()
     try:
-        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16), \
+        with rng, torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16), \
                 (destination / "episodes.jsonl").open("x", buffering=1) as log:
             for group, indices in groups.items():
                 results = []
                 for index in indices:
+                    if rollout_seed is not None:
+                        torch.manual_seed(rollout_seed + (10_000 if group == "validation" else 0) + index)
                     case = splits[group][index]
                     env.start(case)
                     policy.reset()
@@ -172,6 +186,26 @@ def evaluate(policy, preprocessor, postprocessor, splits, destination, *, smoke=
     finally:
         env.close()
     return summary
+
+
+def reevaluate(args):
+    from lerobot.policies.factory import make_pre_post_processors
+    from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
+
+    if args.checkpoint is None or args.output is None:
+        raise ValueError("Reevaluation requires --checkpoint and --output")
+    model_path = args.checkpoint.resolve() / "pretrained_model"
+    policy = SmolVLAPolicy.from_pretrained(model_path, strict=True).float()
+    if (policy.config.chunk_size, policy.config.n_action_steps) != (25, 5):
+        raise RuntimeError("Unexpected checkpoint action cadence")
+    preprocessor, postprocessor = make_pre_post_processors(policy.config, pretrained_path=str(model_path))
+    splits = json.loads((args.data / "splits.json").read_text(encoding="utf-8"))
+    result = evaluate(policy, preprocessor, postprocessor, splits, args.output,
+                      penetration_limit_mm=args.penetration_limit_mm, rollout_seed=ROLLOUT_SEED)
+    summary = dict(step=TOTAL_UPDATES, penetration_limit_mm=args.penetration_limit_mm,
+                   rollout_seed=ROLLOUT_SEED, **result)
+    (args.output / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    print("SMOL_REEVALUATION", json.dumps(summary), flush=True)
 
 
 def run(args):
@@ -411,16 +445,23 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("data", type=Path)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--checkpoint", type=Path)
+    parser.add_argument("--penetration-limit-mm", type=float, default=DEFAULT_PENETRATION_MM)
     run_mode = parser.add_mutually_exclusive_group()
     run_mode.add_argument("--benchmark", action="store_true")
     run_mode.add_argument("--speed-test", type=int, metavar="UPDATES")
+    run_mode.add_argument("--reevaluate", action="store_true")
     parser.add_argument("--compile-mode", choices=("default", "max-autotune", "max-autotune-no-cudagraphs"))
     parser.add_argument("--image-size", type=int, choices=(384, 512))
     parser.add_argument("--batch-size", type=int, choices=(32, 64), default=64)
     parser.add_argument("--micro-batch-size", type=int, choices=(4, 8, 16, 32, 64), default=8)
     parser.add_argument("--video-backend", choices=("torchcodec", "pyav"), default="torchcodec")
     parser.add_argument("--workers", type=int, default=4)
-    run(parser.parse_args())
+    args = parser.parse_args()
+    if args.reevaluate:
+        reevaluate(args)
+    else:
+        run(args)
 
 
 if __name__ == "__main__":
