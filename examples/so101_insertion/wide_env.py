@@ -117,7 +117,7 @@ class WideInsertion(Insertion):
         return float(info["success"]), info["success"], timeout, info
 
 
-def expert(env, case, record=None, at_pick=None, *, seat_offset=.0005, insertion_seconds=2.):
+def expert(env, case, record=None, at_pick=None, *, seat_offset=.0005, insertion_seconds=2., correction_scale=1.):
     env.start(case)
     cmd = env.state().astype(float)
     source, target = [env.model.body(n).pos[:2].copy() for n in ("source", "target")]
@@ -165,8 +165,8 @@ def expert(env, case, record=None, at_pick=None, *, seat_offset=.0005, insertion
     def track_tip(z, axis=(0., 0., 1.)):
         nonlocal cmd, info
         tip = env.data.body("bolt").xpos
-        xy_correction[:] = np.clip(xy_correction + np.clip(.2 * scale * (target-tip[:2]),
-                                                          -.0001 * scale, .0001 * scale),
+        xy_correction[:] = np.clip(xy_correction + np.clip(.2 * correction_scale * (target-tip[:2]),
+                                                          -.0001 * correction_scale, .0001 * correction_scale),
                                    -.002, .002)
         point = np.r_[target+xy_correction, z]
         target_q = env.bolt_ik(point, np.asarray(axis), cmd)
