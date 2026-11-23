@@ -152,6 +152,7 @@ def gate(root):
 
 
 def collect(root):
+    from lerobot.configs import RGBEncoderConfig
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
     accepted = json.loads((root / "gate.json").read_text(encoding="utf-8"))
@@ -166,7 +167,7 @@ def collect(root):
                                names=["height", "width", "channel"]) for key in CAMERAS})
     dataset = LeRobotDataset.create(repo_id=REPO_ID, root=root / "dataset", fps=FPS,
                                     robot_type="so101_mujoco", features=features, use_videos=True,
-                                    vcodec="libx264", video_backend="pyav")
+                                    rgb_encoder=RGBEncoderConfig(vcodec="libx264"), video_backend="pyav")
     env = SmolVLAInsertion()
     cases = []
     lengths = []
