@@ -1,6 +1,7 @@
 """Benchmark and train SmolVLA on the validated 25 Hz insertion dataset."""
 
 import argparse
+import csv
 import json
 import math
 import shutil
@@ -8,11 +9,12 @@ import sys
 import time
 from collections import deque
 from copy import copy
+from itertools import islice
 from pathlib import Path
 
 import numpy as np
 
-from .smolvla25_data import CAMERAS, CORNER_INDICES, FPS, REPO_ID, SmolVLAInsertion
+from .smolvla25_data import CAMERAS, CORNER_INDICES, FPS, REPO_ID, VALIDATION_REPO_ID, SmolVLAInsertion
 
 
 TOTAL_UPDATES = 15_000
@@ -20,6 +22,100 @@ SAVE_EVERY = 2_500
 EVAL_EVERY = 5_000
 BENCHMARK_UPDATES = 20
 CAMERA_MAP = {key: f"observation.images.camera{i}" for i, key in enumerate(CAMERAS, 1)}
+VALIDATION_SEED = 271828
+
+
+def validation_loader(root, policy_config, backend, batch_size, workers):
+    from torch.utils.data import DataLoader
+    from lerobot.datasets.dataset_metadata import LeRobotDatasetMetadata
+    from lerobot.datasets.factory import resolve_delta_timestamps
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+    path = root / "validation-dataset"
+    meta = LeRobotDatasetMetadata(VALIDATION_REPO_ID, root=path)
+    summary = json.loads((root / "validation-summary.json").read_text(encoding="utf-8"))
+    if (meta.total_episodes, meta.fps, meta.total_frames) != (10, FPS, summary["frames"]):
+        raise RuntimeError("Validation dataset is incomplete or has an incompatible frame rate")
+    dataset = LeRobotDataset(VALIDATION_REPO_ID, root=path, return_uint8=True, video_backend=backend,
+                             delta_timestamps=resolve_delta_timestamps(policy_config, meta, CAMERA_MAP))
+    return DataLoader(dataset, batch_size=batch_size, num_workers=min(workers, 2), shuffle=False, pin_memory=True)
+
+
+def validation_loss(policy, preprocessor, loader, *, limit_batches=None):
+    import torch
+    from lerobot.scripts.lerobot_train import _preprocess_dataset_batch
+
+    was_training = policy.training
+    policy.eval()
+    frames = valid_action_steps = 0
+    loss_sum = 0.0
+    try:
+        with torch.random.fork_rng(devices=[torch.cuda.current_device()]), torch.no_grad(), \
+                torch.autocast("cuda", dtype=torch.bfloat16):
+            torch.manual_seed(VALIDATION_SEED)
+            batches = loader if limit_batches is None else islice(loader, limit_batches)
+            for raw in batches:
+                batch = _preprocess_dataset_batch(raw, loader.dataset.meta.camera_keys, CAMERA_MAP, preprocessor)
+                loss, _ = policy(batch)
+                batch_frames, horizon = batch["action"].shape[:2]
+                pad = batch.get("action_is_pad")
+                count = batch_frames * horizon if pad is None else int((~pad).sum().item())
+                value = loss.item()
+                if not math.isfinite(value) or count == 0:
+                    raise RuntimeError(f"Invalid held-out loss: {value}, valid action steps: {count}")
+                loss_sum += value * count
+                valid_action_steps += count
+                frames += batch_frames
+    finally:
+        policy.train(was_training)
+    if not frames or (limit_batches is None and frames != len(loader.dataset)):
+        raise RuntimeError(f"Validation scored {frames} of {len(loader.dataset)} frames")
+    return dict(val_loss=loss_sum / valid_action_steps, validation_frames=frames,
+                validation_action_steps=valid_action_steps, validation_seed=VALIDATION_SEED)
+
+
+def append_json(path, row):
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row) + "\n")
+
+
+def save_curves(output):
+    import matplotlib
+
+    matplotlib.use("Agg")
+    from matplotlib import pyplot as plt
+
+    train = [json.loads(line) for line in (output / "train-metrics.jsonl").read_text(encoding="utf-8").splitlines()]
+    val = {row["step"]: row for row in map(json.loads, (output / "validation-metrics.jsonl")
+           .read_text(encoding="utf-8").splitlines())}
+    csv_temp = output / "curves.tmp.csv"
+    fields = (*train[0].keys(), "val_loss")
+    with csv_temp.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        for row in train:
+            writer.writerow(dict(**row, val_loss=val.get(row["step"], {}).get("val_loss")))
+    csv_temp.replace(output / "curves.csv")
+
+    steps = [row["step"] for row in train]
+    losses = np.array([row["train_loss"] for row in train])
+    window = min(50, len(losses))
+    smoothed = np.convolve(losses, np.full(window, 1 / window), mode="valid")
+    fig, (ax_loss, ax_lr) = plt.subplots(2, 1, sharex=True, figsize=(9, 6), layout="constrained")
+    ax_loss.plot(steps, losses, color="#2867a0", alpha=.19, linewidth=.8)
+    ax_loss.plot(steps[window - 1:], smoothed, color="#2867a0", label=f"Train loss ({window}-step mean)")
+    ax_loss.plot(list(val), [row["val_loss"] for row in val.values()], "o-", color="#bd592c", label="Validation loss")
+    ax_loss.set_ylabel("Flow matching loss")
+    ax_loss.legend()
+    ax_lr.plot(steps, [row["lr"] for row in train], color="#337d74")
+    ax_lr.set_ylabel("Learning rate")
+    ax_lr.set_xlabel("Optimizer step")
+    for axis in (ax_loss, ax_lr):
+        axis.grid(alpha=.2)
+    figure_temp = output / "curves.tmp.png"
+    fig.savefig(figure_temp, dpi=150)
+    plt.close(fig)
+    figure_temp.replace(output / "curves.png")
 
 
 def evaluate(policy, preprocessor, postprocessor, splits, destination, *, smoke=False):
@@ -96,6 +192,9 @@ def run(args):
     accumulation = args.batch_size // args.micro_batch_size
     speed_test = args.speed_test is not None
     measure_timing = args.benchmark or speed_test
+    formal = not measure_timing
+    if formal and not (root / "validation-summary.json").is_file():
+        raise RuntimeError("Collect the ten held-out expert trajectories before formal training")
     run_name = "speed-test" if speed_test else "smoke" if args.benchmark else "training"
     output = args.output.resolve() if args.output else root / run_name
     target_updates = args.speed_test if speed_test else BENCHMARK_UPDATES if args.benchmark else TOTAL_UPDATES
@@ -133,7 +232,10 @@ def run(args):
                            master_weight_dtype="float32", ema_enabled=False,
                            chunk_size=policy.config.chunk_size, n_action_steps=policy.config.n_action_steps,
                            empty_cameras=policy.config.empty_cameras, rename_map=CAMERA_MAP,
-                           image_resize=policy.config.resize_imgs_with_padding)
+                           image_resize=policy.config.resize_imgs_with_padding, compiled=policy.config.compile_model)
+        if formal:
+            current["validation_loader"] = validation_loader(root, policy.config, args.video_backend,
+                                                             args.micro_batch_size, args.workers)
         print("SMOL_WEIGHT_CONFIG", json.dumps(weight_info), flush=True)
         return policy
 
@@ -178,6 +280,16 @@ def run(args):
                 update_losses.append(float(np.mean(window_losses)))
                 data_times.append(float(np.sum(window_data)))
                 print("SMOL_UPDATE", updates, "loss", update_losses[-1], "seconds", round(times[-1], 3), flush=True)
+            else:
+                now = time.perf_counter()
+                optimizer = update_args[3] if len(update_args) > 3 else update_kwargs["optimizer"]
+                row = dict(step=updates, train_loss=float(np.mean(window_losses)), lr=optimizer.param_groups[0]["lr"],
+                           seconds=now - last_update, peak_reserved_gib=peak_reserved)
+                output.mkdir(parents=True, exist_ok=True)
+                append_json(output / "train-metrics.jsonl", row)
+                last_update = now
+                if updates == 1 or updates % 50 == 0:
+                    print("SMOL_FORMAL_UPDATE", json.dumps(row), flush=True)
             window_losses.clear()
             window_data.clear()
         return tracker, metrics
@@ -189,20 +301,25 @@ def run(args):
             current.update(kwargs)
 
     def mark_latest(checkpoint_dir):
-        nonlocal previous
+        nonlocal previous, last_update
         original_last(checkpoint_dir)
         if args.benchmark:
             return
+        accelerator = current["accelerator"]
+        policy = accelerator.unwrap_model(current["policy"])
+        held_out = validation_loss(policy, current["preprocessor"], current["validation_loader"])
+        validation_row = dict(step=updates, train_loss=float(np.mean(losses)), **held_out)
+        append_json(output / "validation-metrics.jsonl", validation_row)
+        save_curves(output)
+        print("SMOL_VALIDATION_LOSS", json.dumps(validation_row), flush=True)
         if updates % EVAL_EVERY == 0:
-            accelerator = current["accelerator"]
-            policy = accelerator.unwrap_model(current["policy"])
             destination = output / f"eval-{updates:05d}"
             was_training = policy.training
             try:
                 result = evaluate(policy, current["preprocessor"], current["postprocessor"], splits, destination)
             finally:
                 policy.train(was_training)
-            summary = dict(step=updates, train_loss=float(np.mean(losses)), **result)
+            summary = dict(**validation_row, **result)
             (destination / "summary.json").write_text(json.dumps(summary, indent=2))
             print(json.dumps(summary), flush=True)
         if previous is not None:
@@ -211,6 +328,7 @@ def run(args):
                 raise RuntimeError(f"Refusing to prune checkpoint outside this run: {previous}")
             shutil.rmtree(old)
         previous = checkpoint_dir
+        last_update = time.perf_counter()
 
     trainer.make_policy = make_policy
     trainer.make_optimizer_and_scheduler = make_optimizer_and_scheduler
