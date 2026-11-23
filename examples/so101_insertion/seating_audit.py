@@ -12,6 +12,7 @@ from .scene import MOUTH_Z, SHAFT_RADIUS
 from .wide_env import WideInsertion
 
 CONTACT_TOLERANCE_M = 0.0002  # Match the seating check's existing floor penetration allowance.
+TASK_CENTERLINE_LIMIT_M = 0.002  # Match the base task's radial acceptance tolerance.
 SEAT_TICKS = 25
 
 
@@ -23,11 +24,14 @@ def seating_snapshot(env):
     contact_penetration = 0.0
     geometric_overclosure = 0.0
     soft_containment = False
+    task_seated = False
     if depth_and_tilt:
         tip = bolt.xpos[:2] - env.model.body("target").pos[:2]
         slope = axis[:2] / axis[2]
         mouth_center = tip + (MOUTH_Z - bolt.xpos[2]) * slope
         center_extents = np.maximum(env.normals @ tip, env.normals @ mouth_center)
+        task_seated = (np.all(center_extents <= env.faces)
+                       and max(np.linalg.norm(tip), np.linalg.norm(mouth_center)) < TASK_CENTERLINE_LIMIT_M)
         edge_extents = center_extents + SHAFT_RADIUS * np.sqrt(1 + (env.normals @ slope)**2)
         outside = edge_extents > env.faces
         geometric_overclosure = max(0.0, float(np.max(edge_extents - env.faces)))
@@ -45,7 +49,7 @@ def seating_snapshot(env):
         soft_containment = (np.all(center_extents <= env.faces)
                             and np.all(np.isin(env.walls[outside], closed_wall_contacts))
                             and contact_penetration <= CONTACT_TOLERANCE_M)
-    return bool(hard_containment), bool(soft_containment), bool(depth_and_tilt), contact_penetration, geometric_overclosure
+    return bool(hard_containment), bool(soft_containment), bool(task_seated), contact_penetration, geometric_overclosure
 
 
 def evaluate(env, case, actions):
@@ -57,8 +61,8 @@ def evaluate(env, case, actions):
     peak_contact = 0.0
     for action in actions:
         _, _, timeout, _ = env.step(action)
-        strict, soft, depth, penetration, overclosure = seating_snapshot(env)
-        current = (current + 1) * np.array([strict, soft, depth])
+        strict, soft, task, penetration, overclosure = seating_snapshot(env)
+        current = (current + 1) * np.array([strict, soft, task])
         longest = np.maximum(longest, current)
         last_window.append(penetration)
         if revised_window_penetration is None and current[1] == SEAT_TICKS:
@@ -67,8 +71,9 @@ def evaluate(env, case, actions):
         if timeout:
             break
     return dict(
-        strict_streak=int(longest[0]), soft_contact_streak=int(longest[1]), depth_and_tilt_streak=int(longest[2]),
+        strict_streak=int(longest[0]), soft_contact_streak=int(longest[1]), task_seated_streak=int(longest[2]),
         strict_success=bool(longest[0] >= SEAT_TICKS), soft_contact_success=bool(longest[1] >= SEAT_TICKS),
+        task_seated_success=bool(longest[2] >= SEAT_TICKS), task_seated_final_streak=int(current[2]),
         peak_wall_penetration_mm=peak_contact * 1000, last_wall_penetration_mm=penetration * 1000,
         last_geometric_overclosure_mm=overclosure * 1000,
         successful_window_max_wall_penetration_mm=revised_window_penetration,
@@ -78,25 +83,27 @@ def evaluate(env, case, actions):
 def verify_poses(env):
     """Check physically the same scene for passing and failing near-floor poses."""
     test_cases = (
-        ("centered", 0.0, 0.0005, 0.0, True),
-        ("touching", 0.0008, 0.0005, 0.0, True),
-        ("heavy_wall_overlap", 0.0015, 0.0005, 0.0, False),
-        ("outside_bore", 0.01, 0.0005, 0.0, False),
-        ("too_shallow", 0.0, 0.003, 0.0, False),
-        ("too_tilted", 0.0, 0.001, 0.12, False),
-        ("beyond_floor", 0.0, -0.001, 0.0, False),
+        ("centered", 0.0, 0.0005, 0.0, True, True),
+        ("touching", 0.0008, 0.0005, 0.0, True, True),
+        ("heavy_wall_overlap", 0.0015, 0.0005, 0.0, False, True),
+        ("off_center", 0.0025, 0.0005, 0.0, False, False),
+        ("outside_bore", 0.01, 0.0005, 0.0, False, False),
+        ("too_shallow", 0.0, 0.003, 0.0, False, False),
+        ("too_tilted", 0.0, 0.001, 0.12, False, False),
+        ("beyond_floor", 0.0, -0.001, 0.0, False, False),
     )
     result = {}
-    for label, x, gap, tilt, expected in test_cases:
+    for label, x, gap, tilt, expected_soft, expected_task in test_cases:
         env.start(initial_case((0, 0)))
         target = env.model.body("target").pos[:2]
         env.data.qpos[env.bolt_address:env.bolt_address+7] = (
             target[0] + x, target[1], env.floor_z + gap, np.cos(tilt / 2), 0, np.sin(tilt / 2), 0,
         )
         mujoco.mj_forward(env.model, env.data)
-        strict, soft, depth, penetration, overclosure = seating_snapshot(env)
-        assert soft == expected, (label, strict, soft, depth, penetration, overclosure)
-        result[label] = dict(strict=strict, soft_contact=soft, measured_wall_penetration_mm=penetration * 1000)
+        strict, soft, task, penetration, overclosure = seating_snapshot(env)
+        assert (soft, task) == (expected_soft, expected_task), (label, strict, soft, task, penetration, overclosure)
+        result[label] = dict(strict=strict, soft_contact=soft, task_seated=task,
+                             measured_wall_penetration_mm=penetration * 1000)
     return result
 
 
@@ -137,8 +144,10 @@ def audit(root):
     assert len(results) == len(by_key)
     for r in results:
         assert r["strict_success"] == by_key[r["case"], r["expert"], r["hz"], r["std_rad"], r["seed"]], r
-    (root / "seating-audit-soft-contact.json").write_text(json.dumps(
-        dict(contact_tolerance_mm=CONTACT_TOLERANCE_M * 1000, pose_checks=checks, results=results), indent=2),
+    (root / "seating-audit-task.json").write_text(json.dumps(
+        dict(contact_tolerance_mm=CONTACT_TOLERANCE_M * 1000,
+             task_centerline_limit_mm=TASK_CENTERLINE_LIMIT_M * 1000,
+             pose_checks=checks, results=results), indent=2),
         encoding="utf-8")
 
 
