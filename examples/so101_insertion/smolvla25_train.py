@@ -7,6 +7,7 @@ import shutil
 import sys
 import time
 from collections import deque
+from copy import copy
 from pathlib import Path
 
 import numpy as np
@@ -97,6 +98,7 @@ def run(args):
     original_save = trainer.save_checkpoint
     original_last = trainer.update_last_checkpoint
     original_make_policy = trainer.make_policy
+    original_make_optimizer = trainer.make_optimizer_and_scheduler
     updates = 0
     times = []
     last_update = None
@@ -127,9 +129,15 @@ def run(args):
         print("SMOL_WEIGHT_CONFIG", json.dumps(weight_info), flush=True)
         return policy
 
+    def make_optimizer_and_scheduler(cfg, policy):
+        schedule_cfg = copy(cfg)
+        schedule_cfg.steps = TOTAL_UPDATES * accumulation
+        return original_make_optimizer(schedule_cfg, policy)
+
     def update(*update_args, **update_kwargs):
         nonlocal updates, last_update, peak_reserved, peak_allocated
         accelerator = update_kwargs["accelerator"]
+        scheduler = update_kwargs.pop("lr_scheduler")
         if accelerator.mixed_precision != "bf16" or accelerator.num_processes != 1:
             raise RuntimeError("Use one GPU with BF16 mixed precision")
         if last_update is None:
@@ -149,6 +157,8 @@ def run(args):
         if accelerator.sync_gradients:
             if accelerator.optimizer_step_was_skipped:
                 raise RuntimeError("Optimizer update was skipped")
+            if scheduler is not None:
+                scheduler.step()
             updates += 1
             if args.benchmark:
                 torch.cuda.synchronize()
@@ -192,6 +202,7 @@ def run(args):
         previous = checkpoint_dir
 
     trainer.make_policy = make_policy
+    trainer.make_optimizer_and_scheduler = make_optimizer_and_scheduler
     trainer.update_policy = update
     trainer.save_checkpoint = save
     trainer.update_last_checkpoint = mark_latest
@@ -220,6 +231,9 @@ def run(args):
             raise RuntimeError("EMA files appeared in a run with EMA disabled")
         if not (model_path / "model.safetensors").is_file():
             raise RuntimeError("The twentieth optimizer update did not save a policy checkpoint")
+        scheduler_state = json.loads((checkpoint / "training_state" / "scheduler_state.json").read_text())
+        if scheduler_state["last_epoch"] != BENCHMARK_UPDATES:
+            raise RuntimeError(f"Scheduler advanced {scheduler_state['last_epoch']} times during the smoke test")
         seconds = float(np.mean(times[4:]))
         timing = dict(**weight_info, updates=updates, train_loss_step1=update_losses[0],
                       train_loss_step20=update_losses[-1], seconds_per_update=seconds,
@@ -228,6 +242,7 @@ def run(args):
                       peak_reserved_gib=peak_reserved, peak_allocated_gib=peak_allocated,
                       batch_size=args.batch_size, micro_batch_size=args.micro_batch_size,
                       gradient_accumulation_steps=accumulation, video_backend=args.video_backend,
+                      scheduler_updates=scheduler_state["last_epoch"], scheduler_decay_steps=TOTAL_UPDATES,
                       checkpoint=str(checkpoint), seconds_through_save=time.perf_counter() - began)
         (output / "timing.json").write_text(json.dumps(timing, indent=2))
         print("SMOL_TIMING", json.dumps(timing), flush=True)
