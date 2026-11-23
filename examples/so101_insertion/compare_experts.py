@@ -38,6 +38,7 @@ class CollectedInsertion(WideInsertion):
     def start(self, case):
         super().start(case)
         self.frames = []
+        self.control = []
         self.result = {}
         self.start_state = self.observation_state()
 
@@ -52,14 +53,16 @@ class CollectedInsertion(WideInsertion):
         }
 
     def step(self, action):
+        applied = np.clip(action, self.low, self.high)
+        self.control.append(applied)
         if self.steps % 2 == 0:
             frame = self.observation_state()
-            frame.update(action=np.clip(action, self.low, self.high), phase=self.phase)
+            frame.update(action=applied, phase=self.phase)
             if self.images:
                 obs = self.observation()
                 frame.update(top=obs["observation.images.top"], wrist=obs["observation.images.wrist"])
             self.frames.append(frame)
-        reward, done, timeout, info = super().step(self.frames[-1]["action"])
+        reward, done, timeout, info = super().step(applied)
         self.result = info
         return reward, done, timeout, info
 
@@ -97,14 +100,14 @@ def maniskill_style(env, case):
         grip_start = env.data.ctrl[-1]
         commands = []
         env.phase = phase
-        for tick in range(0, ticks, 2):
-            t = (tick + 2) / ticks
+        for tick in range(1, ticks + 1):
+            t = tick / ticks
             fraction = t if linear else t * t * (3.0 - 2.0 * t)
             p = start_point + fraction * (point - start_point)
             direction = start_axis + fraction * (axis - start_axis)
             q = solve(p, direction / np.linalg.norm(direction), q)
             q[-1] = grip_start + fraction * (grip - grip_start)
-            commands.extend((q.copy(), q.copy()))
+            commands.append(q.copy())
         return execute(phase, commands)
 
     axis = bolt.xmat.reshape(3, 3)[:, 2].copy()
@@ -199,7 +202,7 @@ def summarize_nominal(env, result, warnings):
     opening = np.r_[False, np.diff(action[:, -1]) > 0.001]
     withdraw = np.isin(phase, ("release", "withdraw", "retreat", "retract"))
     return {
-        "frames": len(frames), "physics_ticks": env.steps,
+        "frames": len(frames), "control_ticks": env.steps,
         "pickup": bool(result.get("pickup")), "insertion": bool(result.get("success")),
         "arrival": bool(result.get("arrival")), "reason": result.get("reason"),
         "static_frames": int(np.sum(np.max(abs(dq), axis=1) < 0.001)), "static_denominator": len(dq),
@@ -220,14 +223,13 @@ def replay(env, case, action, std, seed):
     env.start(case)
     rng = np.random.default_rng(seed)
     if std:
-        bias = rng.normal(0, std, size=((len(action) + BLOCK - 1) // BLOCK, action.shape[-1]))
-        action = action + np.repeat(bias, BLOCK, axis=0)[:len(action)]
-    # Preserve the same physics ticks and stopping predicate as nominal collection.
+        block_ticks = 2 * BLOCK
+        bias = rng.normal(0, std, size=((len(action) + block_ticks - 1) // block_ticks, action.shape[-1]))
+        action = action + np.repeat(bias, block_ticks, axis=0)[:len(action)]
     for cmd in action:
-        for _ in range(2):
-            _, done, timeout, info = env.step(cmd)
-            if done or timeout:
-                return info
+        _, done, timeout, info = env.step(cmd)
+        if done or timeout:
+            return info
     return info
 
 
@@ -271,7 +273,7 @@ def run(output, videos):
     warnings = []
     previous_warning = mujoco.get_mju_user_warning()
     mujoco.set_mju_user_warning(warnings.append)
-    metadata = dict(fps=FPS, physics_dt_s=env.model.opt.timestep, clearance_mm=0.7, joints=JOINTS,
+    metadata = dict(fps=FPS, control_hz=50, physics_dt_s=env.model.opt.timestep, clearance_mm=0.7, joints=JOINTS,
                     cases=CASES, seeds=SEEDS, noise_std_rad=STDS, noise_block_frames=BLOCK, mujoco=mujoco.__version__)
     (output / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
@@ -294,18 +296,22 @@ def run(output, videos):
                     metrics, arrays = summarize_nominal(env, result, warnings.copy())
                     save_row(nominal, dict(case=name, hole_offset_mm=xy, expert=label, **metrics))
                     arrays["initial_q_rad"] = env.start_state["q"]
+                    arrays["control_action_50hz_rad"] = np.array(env.control)
                     if videos:
                         for cam in ("top", "wrist"):
                             arrays[cam] = np.array([f[cam] for f in env.frames])
                         clips.append(arrays)
                     np.savez_compressed(output / "trajectories" / f"{name}_{label}.npz", **arrays)
-                    plan = [(0.0, SEEDS[0])] + [(std, seed) for std in STDS for seed in SEEDS]
-                    for std, seed in plan:
+                    full = arrays["control_action_50hz_rad"]
+                    held = np.repeat(arrays["action_rad"], 2, axis=0)[:len(full)]
+                    plan = [(50, full, 0.0, SEEDS[0]), (25, held, 0.0, SEEDS[0])]
+                    plan += [(25, held, std, seed) for std in STDS for seed in SEEDS]
+                    for command_hz, commands, std, seed in plan:
                         warnings.clear()
-                        replay_result = replay(replay_env, case, arrays["action_rad"], std, seed)
-                        save_row(replays, dict(case=name, expert=label, std_rad=std, seed=seed,
+                        replay_result = replay(replay_env, case, commands, std, seed)
+                        save_row(replays, dict(case=name, expert=label, command_hz=command_hz, std_rad=std, seed=seed,
                                              pickup=replay_result["pickup"], insertion=replay_result["success"],
-                                             arrival=replay_result["arrival"], physics_ticks=replay_env.steps,
+                                             arrival=replay_result["arrival"], control_ticks=replay_env.steps,
                                              radial_error_mm=1000 * replay_result["radial_error_m"],
                                              warnings=warnings.copy()))
                     print(name, label, metrics["frames"], metrics["insertion"], metrics["reason"], flush=True)
