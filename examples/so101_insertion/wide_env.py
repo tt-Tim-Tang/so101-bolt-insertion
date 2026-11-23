@@ -1,4 +1,6 @@
 """50 Hz SO-101 task with independent fixtures and stable, geometry-checked seating."""
+from math import ceil
+
 import mujoco
 import numpy as np
 
@@ -6,12 +8,14 @@ from .scene import HOME, MOUTH_Z, SHAFT_RADIUS, SOURCE, TARGET, Insertion
 
 
 class WideInsertion(Insertion):
-    def __init__(self, *, target_bore_radius=.006):
-        super().__init__(max_steps=1000, control_fps=50, target_bore_radius=target_bore_radius, show_target_colliders=True)
+    def __init__(self, *, target_bore_radius=.006, control_fps=50):
+        super().__init__(max_steps=20 * control_fps, control_fps=control_fps,
+                         target_bore_radius=target_bore_radius, show_target_colliders=True)
         ids = np.flatnonzero(self.model.geom_bodyid == self.model.body("target").id)
         self.walls, self.floor = ids[:-1], ids[-1]
         self.model.opt.timestep = .002
-        self.substeps = 10
+        self.control_fps = control_fps
+        self.substeps = round(1 / (control_fps * self.model.opt.timestep))
         self.model.geom_solref[ids, 0] = .006
         self.model.geom_solmix[ids] = 50
         self.floor_z = (self.model.body("target").pos[2] + self.model.geom_pos[self.floor, 2]
@@ -93,7 +97,7 @@ class WideInsertion(Insertion):
         tilt, radial, bottom, inside = self.geometry()
         lift, _, _, jaws = self.pickup_state()
         self.held_ticks = self.held_ticks + 1 if lift >= .025 and jaws else 0
-        self.pick |= self.held_ticks >= 20
+        self.pick |= self.held_ticks >= ceil(.4 * self.control_fps)
         approach = (self.pick and jaws and 0 <= -info["insertion_depth_m"] <= .010 and tilt <= .15)
         self.arrive |= approach and radial <= .005
         self.align |= approach and radial <= .002
@@ -106,7 +110,8 @@ class WideInsertion(Insertion):
                     & (bodies == self.model.body("target").id).any(axis=1))
             if mask.any():
                 self.max_penetration = max(self.max_penetration, float(-contacts.dist[mask].min()))
-        info.update(success=self.seated_ticks >= 25, pickup=self.pick, arrival=self.arrive, alignment=self.align,
+        info.update(success=self.seated_ticks >= ceil(.5 * self.control_fps),
+                    pickup=self.pick, arrival=self.arrive, alignment=self.align,
                     bottom_gap_mm=bottom*1000, stable_ticks=self.max_streak, phase=self.phase,
                     max_joint_step_rad=self.max_jump, max_penetration_mm=self.max_penetration*1000)
         return float(info["success"]), info["success"], timeout, info
@@ -117,9 +122,11 @@ def expert(env, case, record=None, at_pick=None):
     cmd = env.state().astype(float)
     source, target = [env.model.body(n).pos[:2].copy() for n in ("source", "target")]
     info = {}
+    scale = 50 / env.control_fps
 
     def move(phase, point, grip, ticks, up=(0,0,1)):
         nonlocal cmd, info
+        ticks = ceil(ticks / scale)
         env.phase = phase
         try:
             end = env.inverse_kinematics(point, cmd, up)
@@ -158,11 +165,12 @@ def expert(env, case, record=None, at_pick=None):
     def track_tip(z, axis=(0., 0., 1.)):
         nonlocal cmd, info
         tip = env.data.body("bolt").xpos
-        xy_correction[:] = np.clip(xy_correction + np.clip(.2*(target-tip[:2]), -.0001, .0001),
+        xy_correction[:] = np.clip(xy_correction + np.clip(.2 * scale * (target-tip[:2]),
+                                                          -.0001 * scale, .0001 * scale),
                                    -.002, .002)
         point = np.r_[target+xy_correction, z]
         target_q = env.bolt_ik(point, np.asarray(axis), cmd)
-        cmd[:5] += np.clip(target_q[:5]-cmd[:5], -.025, .025)
+        cmd[:5] += np.clip(target_q[:5]-cmd[:5], -.025 * scale, .025 * scale)
         cmd[-1] = -.055
         action = cmd.astype(np.float32)
         if record:
@@ -173,17 +181,20 @@ def expert(env, case, record=None, at_pick=None):
     env.phase = "air_align"
     start_z = float(env.data.body("bolt").xpos[2])
     start_axis = env.data.body("bolt").xmat.reshape(3, 3)[:, 2].copy()
-    for tick in range(1, 51):
-        f = tick/50
+    align_ticks = ceil(50 / scale)
+    for tick in range(1, align_ticks + 1):
+        f = tick / align_ticks
         blend = f*f*(3-2*f)
         z = start_z + (MOUTH_Z+.005-start_z)*blend
         axis = (1-blend)*start_axis + blend*np.array([0., 0., 1.])
         if track_tip(z, axis/np.linalg.norm(axis)):
             return info
-    # 65 constant-speed descent ticks plus at most 35 settling ticks: 100 total.
-    for tick in range(1, 101):
-        env.phase = "insert" if tick <= 65 else "hold"
-        z = MOUTH_Z+.005 + (env.floor_z+.0005-MOUTH_Z-.005)*min(tick/65, 1)
+    # 1.3 seconds of descent, followed by settling for the remainder of the 2 seconds.
+    descent_ticks = ceil(65 / scale)
+    insertion_ticks = ceil(100 / scale)
+    for tick in range(1, insertion_ticks + 1):
+        env.phase = "insert" if tick <= descent_ticks else "hold"
+        z = MOUTH_Z+.005 + (env.floor_z+.0005-MOUTH_Z-.005)*min(tick / descent_ticks, 1)
         if track_tip(z):
             return info
-    return dict(info, reason="insertion_100_tick_limit")
+    return dict(info, reason=f"insertion_{insertion_ticks}_tick_limit")
