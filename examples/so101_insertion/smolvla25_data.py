@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import shutil
 from itertools import product
 from math import ceil, cos, radians
 from pathlib import Path
@@ -22,6 +23,8 @@ DEPTH_TOLERANCE_M = .002
 MIN_AXIS_Z = cos(radians(12))
 REPO_ID = "local/so101_smolvla25"
 VALIDATION_REPO_ID = "local/so101_smolvla25_validation"
+SUPPLEMENT_REPO_ID = "local/so101_smolvla25_supplement"
+MERGED_REPO_ID = "local/so101_smolvla25_150"
 CAMERAS = ("observation.images.top", "observation.images.wrist")
 EVAL_TRAIN_INDICES = [10 * x + y for x, y in product((0, 3, 6, 9), repeat=2)]
 CORNER_INDICES = {0, 9, 90, 99}
@@ -251,18 +254,103 @@ def collect_validation(root):
     print("SMOL_VALIDATION_DATA", json.dumps(summary), flush=True)
 
 
+def collect_supplement(root, source, baseline, penetration_limit_mm):
+    from lerobot.datasets.aggregate import aggregate_datasets
+    from lerobot.datasets.dataset_metadata import LeRobotDatasetMetadata
+
+    splits = json.loads((source / "splits.json").read_text(encoding="utf-8"))
+    baseline_summary = json.loads((baseline / "summary.json").read_text(encoding="utf-8"))
+    if baseline_summary["penetration_limit_mm"] != penetration_limit_mm or len(splits["train"]) != 100:
+        raise RuntimeError("Supplement collection requires the completed reevaluation and original 100 trajectories")
+    rows = [json.loads(line) for line in (baseline / "episodes.jsonl").read_text(encoding="utf-8").splitlines()]
+    train_rows = [r for r in rows if r["group"] == "train"]
+    if sorted(r["index"] for r in train_rows) != sorted(splits["eval_train_indices"]):
+        raise RuntimeError("Unexpected training initial states in the baseline reevaluation")
+    anchors = [r for r in train_rows if not r["success"] or r["slipped"]] or train_rows
+    weights = np.array([1 + 2 * bool(r["slipped"]) + (not r["arrival"]) + bool(r["penetration_failure"])
+                        for r in anchors], dtype=float)
+    rng = np.random.default_rng(374321)
+    plan = [*anchors, *anchors, *(anchors[i] for i in rng.choice(len(anchors), 50 - 2 * len(anchors),
+                                                                p=weights / weights.sum()))]
+    occupied = {tuple(case["target"]) for case in splits["train"] + splits["validation"]}
+    root.mkdir(parents=True, exist_ok=False)
+    supp_path = root / "supplement"
+    dataset = create_dataset(supp_path, SUPPLEMENT_REPO_ID)
+    env = SmolVLAInsertion(penetration_limit_mm=penetration_limit_mm)
+    extra = []
+    frames_added = 0
+    try:
+        with (root / "supplement-collection.jsonl").open("x", encoding="utf-8", buffering=1) as log:
+            for anchor in plan:
+                center = np.array(splits["train"][anchor["index"]]["target"])
+                low = np.maximum(center - 3, -TARGET_RANGE_MM)
+                high = np.minimum(center + 3, TARGET_RANGE_MM)
+                for _ in range(40):
+                    target = tuple(rng.uniform(low, high))
+                    if target in occupied:
+                        continue
+                    case = make_case(target, rng)
+                    frames, result = record_trial(env, case)
+                    print(json.dumps(dict(anchor_index=anchor["index"], frames=len(frames), **result)), file=log)
+                    if not (result["success"] and result["clock_ok"] and result["finite"]):
+                        continue
+                    for frame in frames:
+                        dataset.add_frame(frame)
+                    dataset.save_episode()
+                    extra.append(case)
+                    occupied.add(target)
+                    frames_added += len(frames)
+                    print(f"SMOL_SUPPLEMENT_EPISODE {len(extra)}/50 anchor={anchor['index']}", flush=True)
+                    break
+                else:
+                    raise RuntimeError(f"Could not collect a successful trajectory near anchor {anchor['index']}")
+    finally:
+        dataset.finalize()
+        env.close()
+    merged_path = root / "dataset"
+    aggregate_datasets([REPO_ID, SUPPLEMENT_REPO_ID], MERGED_REPO_ID, roots=[source / "dataset", supp_path],
+                       aggr_root=merged_path, concatenate_videos=False, concatenate_data=False)
+    base = LeRobotDatasetMetadata(REPO_ID, root=source / "dataset")
+    supplement = LeRobotDatasetMetadata(SUPPLEMENT_REPO_ID, root=supp_path)
+    merged = LeRobotDatasetMetadata(MERGED_REPO_ID, root=merged_path)
+    if (base.total_episodes, supplement.total_episodes, merged.total_episodes, merged.total_frames, merged.fps) != (
+            100, 50, 150, base.total_frames + frames_added, FPS):
+        raise RuntimeError("Merged training dataset has unexpected episode or frame counts")
+    for key in ("action", "observation.state"):
+        a, b = base.stats[key], supplement.stats[key]
+        count = a["count"] + b["count"]
+        mean = (a["mean"] * a["count"] + b["mean"] * b["count"]) / count
+        if not (np.array_equal(merged.stats[key]["count"], count) and np.allclose(merged.stats[key]["mean"], mean)):
+            raise RuntimeError(f"Merged normalization stats are inconsistent for {key}")
+    splits["train"].extend(extra)
+    (root / "splits.json").write_text(json.dumps(splits, indent=2), encoding="utf-8")
+    (root / "validation-dataset").symlink_to((source / "validation-dataset").resolve(), target_is_directory=True)
+    shutil.copyfile(source / "validation-summary.json", root / "validation-summary.json")
+    summary = dict(episodes=merged.total_episodes, frames=merged.total_frames, added_episodes=len(extra),
+                   added_frames=frames_added, repo_id=MERGED_REPO_ID, fps=FPS, penetration_limit_mm=penetration_limit_mm)
+    (root / "dataset-summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    print("SMOL_MERGED_DATA", json.dumps(summary), flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("stage", choices=("gate", "collect", "validation"))
+    parser.add_argument("stage", choices=("gate", "collect", "validation", "supplement"))
     parser.add_argument("out", type=Path)
+    parser.add_argument("--source", type=Path)
+    parser.add_argument("--baseline", type=Path)
+    parser.add_argument("--penetration-limit-mm", type=float, default=DEFAULT_PENETRATION_MM)
     args = parser.parse_args()
     if args.stage == "gate":
         if not gate(args.out):
             raise SystemExit(1)
     elif args.stage == "collect":
         collect(args.out)
-    else:
+    elif args.stage == "validation":
         collect_validation(args.out)
+    else:
+        if args.source is None or args.baseline is None:
+            parser.error("supplement requires --source and --baseline")
+        collect_supplement(args.out, args.source, args.baseline, args.penetration_limit_mm)
 
 
 if __name__ == "__main__":
