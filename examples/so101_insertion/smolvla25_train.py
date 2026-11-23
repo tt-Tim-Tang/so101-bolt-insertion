@@ -27,6 +27,7 @@ from .smolvla25_data import (
 
 
 TOTAL_UPDATES = 15_000
+CONTINUATION_UPDATES = 5_000
 SAVE_EVERY = 2_500
 EVAL_EVERY = 5_000
 BENCHMARK_UPDATES = 20
@@ -215,8 +216,10 @@ def run(args):
     root = args.data.resolve()
     data = json.loads((root / "dataset-summary.json").read_text())
     splits = json.loads((root / "splits.json").read_text())
-    if (data["episodes"], splits["fps"]) != (100, FPS):
-        raise RuntimeError("Expected a complete 100-episode dataset at 25 Hz")
+    continuing = args.continue_training
+    expected_episodes = 150 if continuing else 100
+    if (data["episodes"], splits["fps"]) != (expected_episodes, FPS):
+        raise RuntimeError(f"Expected a complete {expected_episodes}-episode dataset at 25 Hz")
     if not torch.cuda.is_available() or not torch.cuda.is_bf16_supported():
         raise RuntimeError("CUDA with BF16 support is required for this run")
     if args.batch_size % args.micro_batch_size:
@@ -224,6 +227,26 @@ def run(args):
     if args.speed_test is not None and args.speed_test < 12:
         raise ValueError("Speed tests need at least 12 optimizer updates")
     accumulation = args.batch_size // args.micro_batch_size
+    start_update = TOTAL_UPDATES if continuing else 0
+    schedule_updates = CONTINUATION_UPDATES if continuing else TOTAL_UPDATES
+    checkpoint = None
+    scratch = None
+    peak_lr = 2.5e-5
+    decay_lr = None
+    if continuing:
+        if args.checkpoint is None:
+            raise ValueError("Continuation requires --checkpoint")
+        checkpoint = args.checkpoint.resolve(strict=True)
+        state = json.loads((checkpoint / "training_state/training_step.json").read_text(encoding="utf-8"))
+        if (state["step"], state["batch_size"], state["grad_accum_steps"]) != (
+                start_update * accumulation, args.micro_batch_size, accumulation):
+            raise RuntimeError("Continuation expects the 15,000-step checkpoint with the original batch configuration")
+        old_config = json.loads((checkpoint / "pretrained_model/config.json").read_text(encoding="utf-8"))
+        peak_lr = old_config["optimizer_lr"] * .3
+        decay_lr = old_config["scheduler_decay_lr"] * .3
+        if args.checkpoint_scratch is not None:
+            scratch = args.checkpoint_scratch.resolve()
+            scratch.mkdir(parents=True, exist_ok=True)
     speed_test = args.speed_test is not None
     measure_timing = args.benchmark or speed_test
     formal = not measure_timing
@@ -231,13 +254,14 @@ def run(args):
         raise RuntimeError("Collect the ten held-out expert trajectories before formal training")
     run_name = "speed-test" if speed_test else "smoke" if args.benchmark else "training"
     output = args.output.resolve() if args.output else root / run_name
-    target_updates = args.speed_test if speed_test else BENCHMARK_UPDATES if args.benchmark else TOTAL_UPDATES
+    target_updates = args.speed_test if speed_test else BENCHMARK_UPDATES if args.benchmark else schedule_updates
     steps = target_updates * accumulation
     original_update = trainer.update_policy
     original_save = trainer.save_checkpoint
     original_last = trainer.update_last_checkpoint
     original_make_policy = trainer.make_policy
     original_make_optimizer = trainer.make_optimizer_and_scheduler
+    original_get_checkpoint_dir = trainer.get_step_checkpoint_dir
     updates = 0
     times = []
     first_update_elapsed = None
@@ -275,8 +299,30 @@ def run(args):
 
     def make_optimizer_and_scheduler(cfg, policy):
         schedule_cfg = copy(cfg)
-        schedule_cfg.steps = TOTAL_UPDATES * accumulation
-        return original_make_optimizer(schedule_cfg, policy)
+        schedule_cfg.steps = schedule_updates * accumulation
+        optimizer, scheduler = original_make_optimizer(schedule_cfg, policy)
+        if continuing:
+            from lerobot.optim.optimizers import load_optimizer_state
+
+            load_optimizer_state(optimizer, checkpoint / "training_state")
+            moment_steps = {int(state["step"].item()) for state in optimizer.state.values()}
+            if moment_steps != {start_update}:
+                raise RuntimeError(f"Unexpected restored optimizer steps: {moment_steps}")
+            for group, lr in zip(optimizer.param_groups, scheduler.base_lrs, strict=True):
+                group["lr"] = group["initial_lr"] = lr
+            print("SMOL_CONTINUATION_OPTIMIZER", json.dumps(dict(
+                start_update=start_update, optimizer_states=len(optimizer.state), peak_lr=peak_lr,
+                decay_lr=decay_lr, continuation_updates=target_updates)), flush=True)
+        return optimizer, scheduler
+
+    def continuation_checkpoint_dir(output_dir, total_steps, step):
+        path = original_get_checkpoint_dir(output_dir, start_update + target_updates, start_update + step // accumulation)
+        if scratch is not None and step < total_steps:
+            target = scratch / path.name
+            target.mkdir(exist_ok=False)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.symlink_to(target, target_is_directory=True)
+        return path
 
     def update(*update_args, **update_kwargs):
         nonlocal updates, last_update, first_update_elapsed, peak_reserved, peak_allocated
@@ -317,7 +363,7 @@ def run(args):
             else:
                 now = time.perf_counter()
                 optimizer = update_args[3] if len(update_args) > 3 else update_kwargs["optimizer"]
-                row = dict(step=updates, train_loss=float(np.mean(window_losses)), lr=optimizer.param_groups[0]["lr"],
+                row = dict(step=start_update + updates, train_loss=float(np.mean(window_losses)), lr=optimizer.param_groups[0]["lr"],
                            seconds=now - last_update, peak_reserved_gib=peak_reserved)
                 output.mkdir(parents=True, exist_ok=True)
                 append_json(output / "train-metrics.jsonl", row)
@@ -342,23 +388,31 @@ def run(args):
         accelerator = current["accelerator"]
         policy = accelerator.unwrap_model(current["policy"])
         held_out = validation_loss(policy, current["preprocessor"], current["validation_loader"])
-        validation_row = dict(step=updates, train_loss=float(np.mean(losses)), **held_out)
+        validation_row = dict(step=start_update + updates, train_loss=float(np.mean(losses)), **held_out)
         append_json(output / "validation-metrics.jsonl", validation_row)
         save_curves(output)
         print("SMOL_VALIDATION_LOSS", json.dumps(validation_row), flush=True)
         if updates % EVAL_EVERY == 0:
-            destination = output / f"eval-{updates:05d}"
+            destination = output / f"eval-{start_update + updates:05d}"
             was_training = policy.training
             try:
-                result = evaluate(policy, current["preprocessor"], current["postprocessor"], splits, destination)
+                result = evaluate(policy, current["preprocessor"], current["postprocessor"], splits, destination,
+                                  penetration_limit_mm=args.penetration_limit_mm,
+                                  rollout_seed=ROLLOUT_SEED if continuing else None)
             finally:
                 policy.train(was_training)
-            summary = dict(**validation_row, **result)
+            summary = dict(**validation_row, penetration_limit_mm=args.penetration_limit_mm,
+                           rollout_seed=ROLLOUT_SEED if continuing else None, **result)
             (destination / "summary.json").write_text(json.dumps(summary, indent=2))
             print(json.dumps(summary), flush=True)
         if previous is not None:
             old = previous.resolve(strict=True)
-            if old.parent != checkpoint_dir.resolve().parent or old != previous.absolute() or old == checkpoint_dir.resolve():
+            if scratch is not None and previous.is_symlink():
+                if (previous.parent != checkpoint_dir.parent or old.parent != scratch or old.name != previous.name
+                        or old == checkpoint_dir.resolve()):
+                    raise RuntimeError(f"Refusing to prune unexpected staged checkpoint: {previous}")
+                previous.unlink()
+            elif old.parent != checkpoint_dir.parent.resolve() or old != previous.absolute() or old == checkpoint_dir.resolve():
                 raise RuntimeError(f"Refusing to prune checkpoint outside this run: {previous}")
             shutil.rmtree(old)
         previous = checkpoint_dir
@@ -369,12 +423,15 @@ def run(args):
     trainer.update_policy = update
     trainer.save_checkpoint = save
     trainer.update_last_checkpoint = mark_latest
-    sys.argv = [sys.argv[0], f"--dataset.repo_id={REPO_ID}", f"--dataset.root={root / 'dataset'}",
-                f"--dataset.video_backend={args.video_backend}", "--policy.path=lerobot/smolvla_base",
+    if continuing:
+        trainer.get_step_checkpoint_dir = continuation_checkpoint_dir
+    weights_path = str(checkpoint / "pretrained_model") if continuing else "lerobot/smolvla_base"
+    sys.argv = [sys.argv[0], f"--dataset.repo_id={data.get('repo_id', REPO_ID)}", f"--dataset.root={root / 'dataset'}",
+                f"--dataset.video_backend={args.video_backend}", f"--policy.path={weights_path}",
                 "--policy.device=cuda", "--policy.freeze_vision_encoder=false", "--policy.train_expert_only=false",
                 "--policy.load_vlm_weights=false", "--policy.chunk_size=25", "--policy.n_action_steps=5",
                 "--policy.empty_cameras=1", "--policy.use_amp=false", "--accelerator.mixed_precision=bf16",
-                "--policy.optimizer_lr=2.5e-5", f"--policy.scheduler_decay_steps={TOTAL_UPDATES}",
+                f"--policy.optimizer_lr={peak_lr}", f"--policy.scheduler_decay_steps={schedule_updates}",
                 f"--batch_size={args.micro_batch_size}", f"--accelerator.gradient_accumulation.steps={accumulation}",
                 f"--steps={steps}", f"--save_freq={min(SAVE_EVERY, target_updates) * accumulation}",
                 f"--log_freq={min(50, target_updates) * accumulation}",
@@ -385,9 +442,16 @@ def run(args):
         sys.argv.extend(["--policy.compile_model=true", f"--policy.compile_mode={args.compile_mode}"])
     if args.image_size is not None:
         sys.argv.append(f"--policy.resize_imgs_with_padding=[{args.image_size},{args.image_size}]")
+    if continuing:
+        sys.argv.extend(["--policy.scheduler_warmup_steps=0", f"--policy.scheduler_decay_lr={decay_lr}"])
     trainer.main()
     if updates != target_updates:
         raise RuntimeError(f"Expected {target_updates} optimizer updates, got {updates}")
+    if continuing:
+        final_eval = output / f"eval-{start_update + target_updates:05d}/summary.json"
+        if not final_eval.is_file() or (current["checkpoint_dir"] / "pretrained_model/model.safetensors").stat().st_size == 0:
+            raise RuntimeError("Continuation finished without a complete checkpoint and final evaluation")
+        print("SMOL_CONTINUATION_DONE", current["checkpoint_dir"], final_eval, flush=True)
     if speed_test:
         steady = np.asarray(times[len(times) // 2:])
         seconds = float(steady.mean())
@@ -446,11 +510,13 @@ def main():
     parser.add_argument("data", type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--checkpoint", type=Path)
+    parser.add_argument("--checkpoint-scratch", type=Path)
     parser.add_argument("--penetration-limit-mm", type=float, default=DEFAULT_PENETRATION_MM)
     run_mode = parser.add_mutually_exclusive_group()
     run_mode.add_argument("--benchmark", action="store_true")
     run_mode.add_argument("--speed-test", type=int, metavar="UPDATES")
     run_mode.add_argument("--reevaluate", action="store_true")
+    run_mode.add_argument("--continue-training", action="store_true")
     parser.add_argument("--compile-mode", choices=("default", "max-autotune", "max-autotune-no-cudagraphs"))
     parser.add_argument("--image-size", type=int, choices=(384, 512))
     parser.add_argument("--batch-size", type=int, choices=(32, 64), default=64)
