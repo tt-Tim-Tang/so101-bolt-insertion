@@ -21,6 +21,9 @@ CORNER_INDICES = {0, 9, 90, 99}
 
 
 class SmolVLAInsertion(WideInsertion):
+    # 12 mrad corresponds to 0.38 mm across the 32 mm bore depth.
+    ik_axis_tolerance = .012
+
     def __init__(self):
         super().__init__(target_bore_radius=BORE_RADIUS, control_fps=FPS)
 

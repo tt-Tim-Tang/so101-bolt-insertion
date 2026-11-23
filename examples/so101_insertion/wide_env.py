@@ -8,6 +8,8 @@ from .scene import HOME, MOUTH_Z, SHAFT_RADIUS, SOURCE, TARGET, Insertion
 
 
 class WideInsertion(Insertion):
+    ik_axis_tolerance = .005
+
     def __init__(self, *, target_bore_radius=.006, control_fps=50):
         super().__init__(max_steps=20 * control_fps, control_fps=control_fps,
                          target_bore_radius=target_bore_radius, show_target_colliders=True)
@@ -79,8 +81,7 @@ class WideInsertion(Insertion):
             tip = site.xpos + rotation @ local_tip
             up = rotation @ local_axis
             error = position-tip
-            # 0.005 rad contributes <0.2 mm across the 32 mm bore depth.
-            if np.linalg.norm(error) < .00005 and np.dot(up, axis) > np.cos(.005):
+            if np.linalg.norm(error) < .00005 and np.dot(up, axis) > np.cos(self.ik_axis_tolerance):
                 return q
             mujoco.mj_jac(self.model, self.ik_data, jp, jr, tip,
                           int(self.model.site_bodyid[self.grasp_id]))
