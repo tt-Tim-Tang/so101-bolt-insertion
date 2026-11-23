@@ -20,20 +20,19 @@ BENCHMARK_UPDATES = 20
 CAMERA_MAP = {key: f"observation.images.camera{i}" for i, key in enumerate(CAMERAS, 1)}
 
 
-class BenchmarkComplete(Exception):
-    pass
-
-
-def evaluate(policy, preprocessor, postprocessor, splits, destination, accelerator):
+def evaluate(policy, preprocessor, postprocessor, splits, destination, *, smoke=False):
     import cv2
     import torch
 
     destination.mkdir(exist_ok=False)
     env = SmolVLAInsertion()
     summary = {}
+    groups = {"train": [0]} if smoke else {"train": splits["eval_train_indices"],
+                                          "validation": range(len(splits["validation"]))}
+    policy.eval()
     try:
-        with torch.inference_mode(), accelerator.autocast(), (destination / "episodes.jsonl").open("x", buffering=1) as log:
-            groups = {"train": splits["eval_train_indices"], "validation": range(len(splits["validation"]))}
+        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16), \
+                (destination / "episodes.jsonl").open("x", buffering=1) as log:
             for group, indices in groups.items():
                 results = []
                 for index in indices:
@@ -50,10 +49,11 @@ def evaluate(policy, preprocessor, postprocessor, splits, destination, accelerat
                             actions = policy.predict_action_chunk(preprocessor(batch))[:, :policy.config.n_action_steps]
                             actions = postprocessor(actions.float())[0].detach().cpu().numpy()
                             for action in actions:
-                                if group == "train" and index in CORNER_INDICES:
+                                if smoke or (group == "train" and index in CORNER_INDICES):
                                     rgb = np.concatenate([obs[key] for key in CAMERAS], axis=1)
                                     if writer is None:
-                                        writer = cv2.VideoWriter(str(destination / f"corner-{index:02d}.mp4"),
+                                        video_name = "smoke.mp4" if smoke else f"corner-{index:02d}.mp4"
+                                        writer = cv2.VideoWriter(str(destination / video_name),
                                                                  cv2.VideoWriter_fourcc(*"mp4v"), FPS,
                                                                  (rgb.shape[1], rgb.shape[0]))
                                         if not writer.isOpened():
@@ -83,15 +83,16 @@ def run(args):
     root = args.data.resolve()
     data = json.loads((root / "dataset-summary.json").read_text())
     splits = json.loads((root / "splits.json").read_text())
-    if (data["episodes"], data["fps"], data["warnings"]) != (100, FPS, 0):
-        raise RuntimeError("Expected a complete, warning-free 100-episode dataset at 25 Hz")
+    if (data["episodes"], splits["fps"]) != (100, FPS):
+        raise RuntimeError("Expected a complete 100-episode dataset at 25 Hz")
     if not torch.cuda.is_available() or not torch.cuda.is_bf16_supported():
         raise RuntimeError("CUDA with BF16 support is required for this run")
     if args.batch_size % args.micro_batch_size:
         raise ValueError("Microbatch size must divide batch size")
     accumulation = args.batch_size // args.micro_batch_size
-    output = root / (f"benchmark-b{args.batch_size}-m{args.micro_batch_size}" if args.benchmark else "training")
-    steps = TOTAL_UPDATES * accumulation
+    output = args.output.resolve() if args.output else root / ("smoke" if args.benchmark else "training")
+    target_updates = BENCHMARK_UPDATES if args.benchmark else TOTAL_UPDATES
+    steps = target_updates * accumulation
     original_update = trainer.update_policy
     original_save = trainer.save_checkpoint
     original_last = trainer.update_last_checkpoint
@@ -99,29 +100,52 @@ def run(args):
     updates = 0
     times = []
     last_update = None
-    peak_memory = 0.
+    peak_reserved = peak_allocated = 0.
     losses = deque(maxlen=50 * accumulation)
+    window_losses = []
+    window_data = []
+    data_times = []
+    update_losses = []
+    weight_info = {}
     current = {}
     previous = None
+    began = time.perf_counter()
 
     def make_policy(*policy_args, **policy_kwargs):
         policy = original_make_policy(*policy_args, **policy_kwargs)
-        trainable = [p for p in policy.parameters() if p.requires_grad]
-        if not trainable or any(p.dtype != torch.float32 for p in trainable):
-            raise RuntimeError("SmolVLA trainable parameters must use FP32 master weights")
+        # SmolVLA freezes some structurally unused layers even with both freeze flags off.
+        # Enable gradients on every parameter for this full-finetuning run.
+        policy.float().requires_grad_(True)
+        params = list(policy.parameters())
+        if not params or any(p.dtype != torch.float32 for p in params):
+            raise RuntimeError("SmolVLA parameters must use FP32 master weights")
+        weight_info.update(trainable_parameters=sum(p.numel() for p in params if p.requires_grad),
+                           frozen_parameters=sum(p.numel() for p in params if not p.requires_grad),
+                           master_weight_dtype="float32", ema_enabled=False,
+                           chunk_size=policy.config.chunk_size, n_action_steps=policy.config.n_action_steps,
+                           empty_cameras=policy.config.empty_cameras, rename_map=CAMERA_MAP)
+        print("SMOL_WEIGHT_CONFIG", json.dumps(weight_info), flush=True)
         return policy
 
     def update(*update_args, **update_kwargs):
-        nonlocal updates, last_update, peak_memory
+        nonlocal updates, last_update, peak_reserved, peak_allocated
         accelerator = update_kwargs["accelerator"]
         if accelerator.mixed_precision != "bf16" or accelerator.num_processes != 1:
             raise RuntimeError("Use one GPU with BF16 mixed precision")
+        if last_update is None:
+            last_update = time.perf_counter()
+            torch.cuda.reset_peak_memory_stats()
         tracker, metrics = original_update(*update_args, **update_kwargs)
         loss = float(tracker.loss.val)
         if not math.isfinite(loss):
             raise RuntimeError(f"Nonfinite training loss after {updates} optimizer updates")
         losses.append(loss)
-        peak_memory = max(peak_memory, torch.cuda.max_memory_reserved() / 1024**3)
+        window_losses.append(loss)
+        data_meter = getattr(tracker, "dataloading_s", None)
+        if data_meter is not None:
+            window_data.append(float(data_meter.val))
+        peak_reserved = max(peak_reserved, torch.cuda.max_memory_reserved() / 1024**3)
+        peak_allocated = max(peak_allocated, torch.cuda.max_memory_allocated() / 1024**3)
         if accelerator.sync_gradients:
             if accelerator.optimizer_step_was_skipped:
                 raise RuntimeError("Optimizer update was skipped")
@@ -129,31 +153,34 @@ def run(args):
             if args.benchmark:
                 torch.cuda.synchronize()
                 now = time.perf_counter()
-                if last_update is not None:
-                    times.append(now - last_update)
+                times.append(now - last_update)
                 last_update = now
-                if updates == BENCHMARK_UPDATES:
-                    seconds = float(np.mean(times[4:]))
-                    result = dict(updates=updates, train_loss=float(np.mean(losses)),
-                                  seconds_per_update=seconds, estimated_train_hours=seconds * TOTAL_UPDATES / 3600,
-                                  peak_reserved_gib=peak_memory, batch_size=args.batch_size,
-                                  micro_batch_size=args.micro_batch_size, video_backend=args.video_backend)
-                    (output / "timing.json").write_text(json.dumps(result, indent=2))
-                    print(json.dumps(result), flush=True)
-                    raise BenchmarkComplete
+                update_losses.append(float(np.mean(window_losses)))
+                data_times.append(float(np.sum(window_data)))
+                print("SMOL_UPDATE", updates, "loss", update_losses[-1], "seconds", round(times[-1], 3), flush=True)
+            window_losses.clear()
+            window_data.clear()
         return tracker, metrics
 
     def save(**kwargs):
         original_save(**kwargs)
-        current.update(kwargs)
+        current["checkpoint_dir"] = kwargs["checkpoint_dir"]
+        if not args.benchmark:
+            current.update(kwargs)
 
     def mark_latest(checkpoint_dir):
         nonlocal previous
         original_last(checkpoint_dir)
+        if args.benchmark:
+            return
         accelerator = current["accelerator"]
         policy = accelerator.unwrap_model(current["policy"])
         destination = output / f"eval-{updates:05d}"
-        result = evaluate(policy, current["preprocessor"], current["postprocessor"], splits, destination, accelerator)
+        was_training = policy.training
+        try:
+            result = evaluate(policy, current["preprocessor"], current["postprocessor"], splits, destination)
+        finally:
+            policy.train(was_training)
         summary = dict(step=updates, train_loss=float(np.mean(losses)), **result)
         (destination / "summary.json").write_text(json.dumps(summary, indent=2))
         print(json.dumps(summary), flush=True)
@@ -175,23 +202,54 @@ def run(args):
                 "--policy.empty_cameras=1", "--policy.use_amp=false", "--accelerator.mixed_precision=bf16",
                 "--policy.optimizer_lr=2.5e-5", f"--policy.scheduler_decay_steps={TOTAL_UPDATES}",
                 f"--batch_size={args.micro_batch_size}", f"--accelerator.gradient_accumulation.steps={accumulation}",
-                f"--steps={steps}", f"--save_freq={SAVE_EVERY * accumulation}", f"--log_freq={50 * accumulation}",
+                f"--steps={steps}", f"--save_freq={min(SAVE_EVERY, target_updates) * accumulation}",
+                f"--log_freq={min(50, target_updates) * accumulation}",
                 f"--num_workers={args.workers}", f"--output_dir={output}",
                 f"--rename_map={json.dumps(CAMERA_MAP)}", "--ema.enable=false", "--policy.push_to_hub=false",
-                "--wandb.enable=false", "--env_eval_freq=0", f"--save_checkpoint={str(not args.benchmark).lower()}"]
-    try:
-        trainer.main()
-    except BenchmarkComplete:
-        if not args.benchmark:
-            raise
+                "--wandb.enable=false", "--env_eval_freq=0", "--save_checkpoint=true"]
+    trainer.main()
+    if updates != target_updates:
+        raise RuntimeError(f"Expected {target_updates} optimizer updates, got {updates}")
+    if args.benchmark:
+        from lerobot.policies.factory import make_pre_post_processors
+        from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
+
+        checkpoint = current["checkpoint_dir"]
+        model_path = checkpoint / "pretrained_model"
+        if (checkpoint / "pretrained_model_ema").exists() or (checkpoint / "training_state" / "ema_state.pt").exists():
+            raise RuntimeError("EMA files appeared in a run with EMA disabled")
+        if not (model_path / "model.safetensors").is_file():
+            raise RuntimeError("The twentieth optimizer update did not save a policy checkpoint")
+        seconds = float(np.mean(times[4:]))
+        timing = dict(**weight_info, updates=updates, train_loss_step1=update_losses[0],
+                      train_loss_step20=update_losses[-1], seconds_per_update=seconds,
+                      dataloading_seconds_per_update=float(np.mean(data_times[4:])),
+                      estimated_train_hours=seconds * TOTAL_UPDATES / 3600,
+                      peak_reserved_gib=peak_reserved, peak_allocated_gib=peak_allocated,
+                      batch_size=args.batch_size, micro_batch_size=args.micro_batch_size,
+                      gradient_accumulation_steps=accumulation, video_backend=args.video_backend,
+                      checkpoint=str(checkpoint), seconds_through_save=time.perf_counter() - began)
+        (output / "timing.json").write_text(json.dumps(timing, indent=2))
+        print("SMOL_TIMING", json.dumps(timing), flush=True)
+        torch.cuda.empty_cache()
+        policy = SmolVLAPolicy.from_pretrained(model_path, strict=True).float()
+        if (policy.config.n_action_steps, policy.config.chunk_size) != (5, 25):
+            raise RuntimeError("Reloaded checkpoint has a different action cadence")
+        preprocessor, postprocessor = make_pre_post_processors(policy.config, pretrained_path=str(model_path))
+        destination = output / "reload-eval"
+        result = evaluate(policy, preprocessor, postprocessor, splits, destination, smoke=True)
+        summary = dict(**timing, reload_eval=result, total_seconds=time.perf_counter() - began)
+        (output / "smoke-summary.json").write_text(json.dumps(summary, indent=2))
+        print("SMOL_SMOKE_PASS", json.dumps(summary), flush=True)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("data", type=Path)
+    parser.add_argument("--output", type=Path)
     parser.add_argument("--benchmark", action="store_true")
-    parser.add_argument("--batch-size", type=int, choices=(32, 64), default=32)
-    parser.add_argument("--micro-batch-size", type=int, choices=(4, 8, 16, 32, 64), default=32)
+    parser.add_argument("--batch-size", type=int, choices=(32, 64), default=64)
+    parser.add_argument("--micro-batch-size", type=int, choices=(4, 8, 16, 32, 64), default=8)
     parser.add_argument("--video-backend", choices=("torchcodec", "pyav"), default="torchcodec")
     parser.add_argument("--workers", type=int, default=4)
     run(parser.parse_args())
