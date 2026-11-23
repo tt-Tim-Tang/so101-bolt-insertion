@@ -167,7 +167,8 @@ def collect(root):
                                names=["height", "width", "channel"]) for key in CAMERAS})
     dataset = LeRobotDataset.create(repo_id=REPO_ID, root=root / "dataset", fps=FPS,
                                     robot_type="so101_mujoco", features=features, use_videos=True,
-                                    rgb_encoder=RGBEncoderConfig(vcodec="h264"), video_backend="pyav")
+                                    rgb_encoder=RGBEncoderConfig(vcodec="h264"), video_backend="pyav",
+                                    streaming_encoding=True, encoder_threads=2)
     env = SmolVLAInsertion()
     cases = []
     lengths = []
