@@ -16,7 +16,8 @@ from .smolvla25_data import CAMERAS, CORNER_INDICES, FPS, REPO_ID, SmolVLAInsert
 
 
 TOTAL_UPDATES = 15_000
-SAVE_EVERY = 5_000
+SAVE_EVERY = 2_500
+EVAL_EVERY = 5_000
 BENCHMARK_UPDATES = 20
 CAMERA_MAP = {key: f"observation.images.camera{i}" for i, key in enumerate(CAMERAS, 1)}
 
@@ -183,17 +184,18 @@ def run(args):
         original_last(checkpoint_dir)
         if args.benchmark:
             return
-        accelerator = current["accelerator"]
-        policy = accelerator.unwrap_model(current["policy"])
-        destination = output / f"eval-{updates:05d}"
-        was_training = policy.training
-        try:
-            result = evaluate(policy, current["preprocessor"], current["postprocessor"], splits, destination)
-        finally:
-            policy.train(was_training)
-        summary = dict(step=updates, train_loss=float(np.mean(losses)), **result)
-        (destination / "summary.json").write_text(json.dumps(summary, indent=2))
-        print(json.dumps(summary), flush=True)
+        if updates % EVAL_EVERY == 0:
+            accelerator = current["accelerator"]
+            policy = accelerator.unwrap_model(current["policy"])
+            destination = output / f"eval-{updates:05d}"
+            was_training = policy.training
+            try:
+                result = evaluate(policy, current["preprocessor"], current["postprocessor"], splits, destination)
+            finally:
+                policy.train(was_training)
+            summary = dict(step=updates, train_loss=float(np.mean(losses)), **result)
+            (destination / "summary.json").write_text(json.dumps(summary, indent=2))
+            print(json.dumps(summary), flush=True)
         if previous is not None:
             old = previous.resolve(strict=True)
             if old.parent != checkpoint_dir.resolve().parent or old != previous.absolute() or old == checkpoint_dir.resolve():
