@@ -91,9 +91,14 @@ def run(args):
         raise RuntimeError("CUDA with BF16 support is required for this run")
     if args.batch_size % args.micro_batch_size:
         raise ValueError("Microbatch size must divide batch size")
+    if args.speed_test is not None and args.speed_test < 12:
+        raise ValueError("Speed tests need at least 12 optimizer updates")
     accumulation = args.batch_size // args.micro_batch_size
-    output = args.output.resolve() if args.output else root / ("smoke" if args.benchmark else "training")
-    target_updates = BENCHMARK_UPDATES if args.benchmark else TOTAL_UPDATES
+    speed_test = args.speed_test is not None
+    measure_timing = args.benchmark or speed_test
+    run_name = "speed-test" if speed_test else "smoke" if args.benchmark else "training"
+    output = args.output.resolve() if args.output else root / run_name
+    target_updates = args.speed_test if speed_test else BENCHMARK_UPDATES if args.benchmark else TOTAL_UPDATES
     steps = target_updates * accumulation
     original_update = trainer.update_policy
     original_save = trainer.save_checkpoint
@@ -102,6 +107,7 @@ def run(args):
     original_make_optimizer = trainer.make_optimizer_and_scheduler
     updates = 0
     times = []
+    first_update_elapsed = None
     last_update = None
     peak_reserved = peak_allocated = 0.
     losses = deque(maxlen=50 * accumulation)
@@ -136,7 +142,7 @@ def run(args):
         return original_make_optimizer(schedule_cfg, policy)
 
     def update(*update_args, **update_kwargs):
-        nonlocal updates, last_update, peak_reserved, peak_allocated
+        nonlocal updates, last_update, first_update_elapsed, peak_reserved, peak_allocated
         accelerator = update_kwargs["accelerator"]
         scheduler = update_kwargs.pop("lr_scheduler")
         if accelerator.mixed_precision != "bf16" or accelerator.num_processes != 1:
@@ -161,9 +167,11 @@ def run(args):
             if scheduler is not None:
                 scheduler.step()
             updates += 1
-            if args.benchmark:
+            if measure_timing:
                 torch.cuda.synchronize()
                 now = time.perf_counter()
+                if first_update_elapsed is None:
+                    first_update_elapsed = now - began
                 times.append(now - last_update)
                 last_update = now
                 update_losses.append(float(np.mean(window_losses)))
@@ -219,10 +227,27 @@ def run(args):
                 f"--log_freq={min(50, target_updates) * accumulation}",
                 f"--num_workers={args.workers}", f"--output_dir={output}",
                 f"--rename_map={json.dumps(CAMERA_MAP)}", "--ema.enable=false", "--policy.push_to_hub=false",
-                "--wandb.enable=false", "--env_eval_freq=0", "--save_checkpoint=true"]
+                "--wandb.enable=false", "--env_eval_freq=0", f"--save_checkpoint={str(not speed_test).lower()}"]
+    if args.compile_mode is not None:
+        sys.argv.extend(["--policy.compile_model=true", f"--policy.compile_mode={args.compile_mode}"])
     trainer.main()
     if updates != target_updates:
         raise RuntimeError(f"Expected {target_updates} optimizer updates, got {updates}")
+    if speed_test:
+        steady = np.asarray(times[len(times) // 2:])
+        seconds = float(steady.mean())
+        result = dict(
+            **weight_info, updates=updates, effective_batch=args.batch_size, micro_batch=args.micro_batch_size,
+            accumulation=accumulation, compile_mode=args.compile_mode, video_backend=args.video_backend,
+            seconds_per_update=seconds, median_seconds_per_update=float(np.median(steady)),
+            steady_min_seconds=float(steady.min()), steady_max_seconds=float(steady.max()),
+            samples_per_second=args.batch_size / seconds, estimated_15000_hours=seconds * TOTAL_UPDATES / 3600,
+            first_update_elapsed_seconds=first_update_elapsed, total_elapsed_seconds=time.perf_counter() - began,
+            peak_reserved_gib=peak_reserved, peak_allocated_gib=peak_allocated, update_seconds=times,
+            first_loss=update_losses[0], last_loss=update_losses[-1],
+        )
+        (output / "speed.json").write_text(json.dumps(result, indent=2))
+        print("SMOL_SPEED_RESULT", json.dumps(result), flush=True)
     if args.benchmark:
         from lerobot.policies.factory import make_pre_post_processors
         from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
@@ -264,7 +289,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("data", type=Path)
     parser.add_argument("--output", type=Path)
-    parser.add_argument("--benchmark", action="store_true")
+    run_mode = parser.add_mutually_exclusive_group()
+    run_mode.add_argument("--benchmark", action="store_true")
+    run_mode.add_argument("--speed-test", type=int, metavar="UPDATES")
+    parser.add_argument("--compile-mode", choices=("default", "max-autotune", "max-autotune-no-cudagraphs"))
     parser.add_argument("--batch-size", type=int, choices=(32, 64), default=64)
     parser.add_argument("--micro-batch-size", type=int, choices=(4, 8, 16, 32, 64), default=8)
     parser.add_argument("--video-backend", choices=("torchcodec", "pyav"), default="torchcodec")
