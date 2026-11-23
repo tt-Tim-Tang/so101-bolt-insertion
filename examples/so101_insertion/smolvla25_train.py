@@ -34,6 +34,50 @@ BENCHMARK_UPDATES = 20
 CAMERA_MAP = {key: f"observation.images.camera{i}" for i, key in enumerate(CAMERAS, 1)}
 VALIDATION_SEED = 271828
 ROLLOUT_SEED = 714290
+ORIGINAL_EPISODES = 100
+
+
+def weighted_continuation_loader(loader, seed):
+    import torch
+    from torch.utils.data import DataLoader, WeightedRandomSampler
+
+    dataset = loader.dataset
+    episodes = dataset.meta.episodes
+    indices = list(episodes["episode_index"])
+    starts = list(episodes["dataset_from_index"])
+    stops = list(episodes["dataset_to_index"])
+    if (indices != list(range(150)) or starts != [0, *stops[:-1]] or stops[-1] != len(dataset)
+            or dataset.absolute_to_relative_idx is not None):
+        raise RuntimeError("Weighted sampling requires all 150 episodes in merged order")
+    new_start = starts[ORIGINAL_EPISODES]
+    weights = torch.ones(len(dataset), dtype=torch.double)
+    weights[new_start:] = 2.0
+    sampler = WeightedRandomSampler(weights, num_samples=len(dataset), replacement=True,
+                                    generator=torch.Generator().manual_seed(seed))
+    print("SMOL_MIX_SAMPLER", json.dumps(dict(sampler=type(sampler).__name__, old_episodes=ORIGINAL_EPISODES,
+        new_episodes=len(indices) - ORIGINAL_EPISODES, old_frames=new_start, new_frames=len(dataset) - new_start,
+        old_weight=1, new_weight=2, expected_new_fraction=float(weights[new_start:].sum() / weights.sum()))), flush=True)
+    return DataLoader(dataset, batch_size=loader.batch_size, sampler=sampler, num_workers=loader.num_workers,
+                      pin_memory=loader.pin_memory, drop_last=loader.drop_last, collate_fn=loader.collate_fn,
+                      prefetch_factor=loader.prefetch_factor, persistent_workers=loader.persistent_workers,
+                      multiprocessing_context=loader.multiprocessing_context, worker_init_fn=loader.worker_init_fn)
+
+
+def verify_processor_stats(pipelines, checkpoint_model):
+    import torch
+    from safetensors.torch import load_file
+
+    checked = []
+    for pipeline, suffix in zip(pipelines, ("_normalizer_processor", "_unnormalizer_processor"), strict=True):
+        states = [(name, tensors) for name, tensors in pipeline.state_dict().items() if name.endswith(suffix)]
+        if len(states) != 1:
+            raise RuntimeError(f"Expected exactly one processor with saved state {suffix}")
+        name, actual = states[0]
+        expected = load_file(checkpoint_model / f"{name}.safetensors")
+        if actual.keys() != expected.keys() or any(not torch.equal(actual[k], expected[k]) for k in expected):
+            raise RuntimeError(f"Loaded normalization statistics differ from {name}.safetensors")
+        checked.append(name)
+    print("SMOL_FIXED_NORMALIZATION", json.dumps(dict(checkpoint=str(checkpoint_model), verified_states=checked)), flush=True)
 
 
 def validation_loader(root, policy_config, backend, batch_size, workers):
@@ -262,6 +306,8 @@ def run(args):
     original_make_policy = trainer.make_policy
     original_make_optimizer = trainer.make_optimizer_and_scheduler
     original_get_checkpoint_dir = trainer.get_step_checkpoint_dir
+    original_make_processors = trainer.make_pre_post_processors
+    original_make_dataloaders = trainer.make_dataloaders
     updates = 0
     times = []
     first_update_elapsed = None
@@ -270,6 +316,7 @@ def run(args):
     losses = deque(maxlen=50 * accumulation)
     window_losses = []
     window_data = []
+    window_new = window_samples = 0
     data_times = []
     update_losses = []
     weight_info = {}
@@ -324,8 +371,22 @@ def run(args):
             path.symlink_to(target, target_is_directory=True)
         return path
 
+    def continuation_processors(policy_cfg, pretrained_path=None, **kwargs):
+        checkpoint_model = checkpoint / "pretrained_model"
+        if pretrained_path is None or Path(pretrained_path).resolve() != checkpoint_model:
+            raise RuntimeError("Continuation must initialize preprocessing from the source checkpoint")
+        # The regular fine-tune path would override these tensors with merged-dataset stats.
+        pipelines = original_make_processors(policy_cfg, pretrained_path=str(checkpoint_model))
+        verify_processor_stats(pipelines, checkpoint_model)
+        return pipelines
+
+    def continuation_dataloaders(cfg, dataset, eval_dataset, step, parallel_dims):
+        train_loader, eval_loader = original_make_dataloaders(cfg, dataset, eval_dataset, step, parallel_dims)
+        return weighted_continuation_loader(train_loader, cfg.seed if cfg.seed is not None else 0), eval_loader
+
     def update(*update_args, **update_kwargs):
         nonlocal updates, last_update, first_update_elapsed, peak_reserved, peak_allocated
+        nonlocal window_new, window_samples
         accelerator = update_kwargs["accelerator"]
         scheduler = update_kwargs.pop("lr_scheduler")
         if accelerator.mixed_precision != "bf16" or accelerator.num_processes != 1:
@@ -334,6 +395,11 @@ def run(args):
             last_update = time.perf_counter()
             torch.cuda.reset_peak_memory_stats()
         tracker, metrics = original_update(*update_args, **update_kwargs)
+        if continuing:
+            batch = update_args[2] if len(update_args) > 2 else update_kwargs["batch"]
+            episodes = batch["episode_index"]
+            window_new += int((episodes >= ORIGINAL_EPISODES).sum().item())
+            window_samples += episodes.numel()
         loss = float(tracker.loss.val)
         if not math.isfinite(loss):
             raise RuntimeError(f"Nonfinite training loss after {updates} optimizer updates")
@@ -365,6 +431,8 @@ def run(args):
                 optimizer = update_args[3] if len(update_args) > 3 else update_kwargs["optimizer"]
                 row = dict(step=start_update + updates, train_loss=float(np.mean(window_losses)), lr=optimizer.param_groups[0]["lr"],
                            seconds=now - last_update, peak_reserved_gib=peak_reserved)
+                if continuing:
+                    row.update(new_samples=window_new, old_samples=window_samples - window_new)
                 output.mkdir(parents=True, exist_ok=True)
                 append_json(output / "train-metrics.jsonl", row)
                 last_update = now
@@ -372,6 +440,7 @@ def run(args):
                     print("SMOL_FORMAL_UPDATE", json.dumps(row), flush=True)
             window_losses.clear()
             window_data.clear()
+            window_new = window_samples = 0
         return tracker, metrics
 
     def save(**kwargs):
@@ -425,6 +494,8 @@ def run(args):
     trainer.update_last_checkpoint = mark_latest
     if continuing:
         trainer.get_step_checkpoint_dir = continuation_checkpoint_dir
+        trainer.make_pre_post_processors = continuation_processors
+        trainer.make_dataloaders = continuation_dataloaders
     weights_path = str(checkpoint / "pretrained_model") if continuing else "lerobot/smolvla_base"
     sys.argv = [sys.argv[0], f"--dataset.repo_id={data.get('repo_id', REPO_ID)}", f"--dataset.root={root / 'dataset'}",
                 f"--dataset.video_backend={args.video_backend}", f"--policy.path={weights_path}",
