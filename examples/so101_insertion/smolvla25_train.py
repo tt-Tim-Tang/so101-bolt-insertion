@@ -132,7 +132,8 @@ def run(args):
                            frozen_parameters=sum(p.numel() for p in params if not p.requires_grad),
                            master_weight_dtype="float32", ema_enabled=False,
                            chunk_size=policy.config.chunk_size, n_action_steps=policy.config.n_action_steps,
-                           empty_cameras=policy.config.empty_cameras, rename_map=CAMERA_MAP)
+                           empty_cameras=policy.config.empty_cameras, rename_map=CAMERA_MAP,
+                           image_resize=policy.config.resize_imgs_with_padding)
         print("SMOL_WEIGHT_CONFIG", json.dumps(weight_info), flush=True)
         return policy
 
@@ -230,6 +231,8 @@ def run(args):
                 "--wandb.enable=false", "--env_eval_freq=0", f"--save_checkpoint={str(not speed_test).lower()}"]
     if args.compile_mode is not None:
         sys.argv.extend(["--policy.compile_model=true", f"--policy.compile_mode={args.compile_mode}"])
+    if args.image_size is not None:
+        sys.argv.append(f"--policy.resize_imgs_with_padding=[{args.image_size},{args.image_size}]")
     trainer.main()
     if updates != target_updates:
         raise RuntimeError(f"Expected {target_updates} optimizer updates, got {updates}")
@@ -294,6 +297,7 @@ def main():
     run_mode.add_argument("--benchmark", action="store_true")
     run_mode.add_argument("--speed-test", type=int, metavar="UPDATES")
     parser.add_argument("--compile-mode", choices=("default", "max-autotune", "max-autotune-no-cudagraphs"))
+    parser.add_argument("--image-size", type=int, choices=(384, 512))
     parser.add_argument("--batch-size", type=int, choices=(32, 64), default=64)
     parser.add_argument("--micro-batch-size", type=int, choices=(4, 8, 16, 32, 64), default=8)
     parser.add_argument("--video-backend", choices=("torchcodec", "pyav"), default="torchcodec")
