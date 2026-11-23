@@ -15,7 +15,7 @@ from .wide_env import WideInsertion, expert
 
 FPS = 25
 BORE_RADIUS = .0057
-TARGET_RANGE_MM = 20
+TARGET_RANGE_MM = 18
 MAX_PENETRATION_M = .001
 DEPTH_TOLERANCE_M = .002
 MIN_AXIS_Z = cos(radians(12))
@@ -26,6 +26,8 @@ CORNER_INDICES = {0, 9, 90, 99}
 
 
 class SmolVLAInsertion(WideInsertion):
+    ik_axis_tolerance = .015
+
     def __init__(self):
         super().__init__(target_bore_radius=BORE_RADIUS, control_fps=FPS)
         self.success_steps = ceil(.2 / self.model.opt.timestep)
