@@ -36,6 +36,7 @@ class ActionMap:
             raise ValueError("Invalid SO-101 actuator limits or lock command")
 
     def normalize(self, physical):
+        physical = physical.to(self.mid)
         normalized = ((physical - self.mid) / self.half).clamp(-1, 1)
         return self.lock(normalized)
 
