@@ -26,9 +26,15 @@ NOISE_SIGMA = .1  # RLinf ManiSkill TD3 actor setting, in normalized units.
 
 
 class ActionMap:
-    def __init__(self, env):
-        self.low = torch.as_tensor(env.low, dtype=torch.float32, device="cuda")
-        self.high = torch.as_tensor(env.high, dtype=torch.float32, device="cuda")
+    def __init__(self, env, arm_limits=None, sigma=NOISE_SIGMA):
+        low, high = env.low.copy(), env.high.copy()
+        if arm_limits is not None:
+            low[:5], high[:5] = arm_limits
+            if not (np.all(low >= env.low) and np.all(high <= env.high)):
+                raise ValueError("Demonstration action limits exceed actuator limits")
+        self.sigma = sigma
+        self.low = torch.as_tensor(low, dtype=torch.float32, device="cuda")
+        self.high = torch.as_tensor(high, dtype=torch.float32, device="cuda")
         self.half = (self.high - self.low) / 2
         self.mid = (self.high + self.low) / 2
         self.closed = (GRIP - self.mid[-1]) / self.half[-1]
@@ -50,8 +56,8 @@ class ActionMap:
 
     def report(self):
         return [
-            dict(joint=name, min_rad=low, max_rad=high, raw_noise_sigma_rad=NOISE_SIGMA * (high - low) / 2,
-                 executed_noise_sigma_rad=NOISE_SIGMA * (high - low) / 2 if i < 5 else 0.)
+            dict(joint=name, min_rad=low, max_rad=high, raw_noise_sigma_rad=self.sigma * (high - low) / 2,
+                 executed_noise_sigma_rad=self.sigma * (high - low) / 2 if i < 5 else 0.)
             for i, (name, low, high) in enumerate(zip(JOINTS, self.low.tolist(), self.high.tolist(), strict=True))
         ]
 
@@ -61,34 +67,40 @@ def save_json(path, value):
     print(json.dumps(value), flush=True)
 
 
+def collect_start(env, index, case, seed):
+    row = dict(index=index, case=case, seed=seed)
+    state = None
+    actions = []
+
+    def record(action):
+        nonlocal state
+        if state is None and env.phase == "insert":
+            tip = env.data.body("bolt").xpos.copy()
+            offset = np.r_[tip[:2] - env.model.body("target").pos[:2], tip[2] - MOUTH_Z]
+            if env.pick and env.pickup_state()[-1] and 0 < offset[2] <= .010:
+                state = np.empty(mujoco.mj_stateSize(env.model, STATE))
+                mujoco.mj_getState(env.model, env.data, state, STATE)
+                row.update(tip_offset_mm=(offset * 1000).tolist(), tilt_rad=env.info()["tilt_rad"])
+        if state is not None:
+            actions.append(action.copy())
+
+    result = trial(env, case, record)
+    row["expert_success"] = result["success"]
+    if state is None:
+        row["reset_rejection"] = result.get("reason") or "no held state above the mouth"
+    return row, state, np.asarray(actions, dtype=np.float32)
+
+
 def collect_starts(env, cases, folder, label):
     folder.mkdir()
     starts = []
     for index, case in cases:
-        state = None
-        actions = []
-
-        def record(action):
-            nonlocal state
-            if state is None and env.phase == "insert":
-                tip = env.data.body("bolt").xpos.copy()
-                offset = np.r_[tip[:2] - env.model.body("target").pos[:2], tip[2] - MOUTH_Z]
-                if not env.pick or not env.pickup_state()[-1] or not 0 < offset[2] <= .010:
-                    raise RuntimeError(f"Invalid held start at {label}/{index}: {offset.tolist()}")
-                state = np.empty(mujoco.mj_stateSize(env.model, STATE))
-                mujoco.mj_getState(env.model, env.data, state, STATE)
-                row.update(tip_offset_mm=(offset * 1000).tolist(), tilt_rad=env.info()["tilt_rad"])
-            if state is not None:
-                actions.append(action.copy())
-
-        row = dict(index=index, case=case, seed=714290 + index + (10000 if label == "baseline" else 0))
-        result = trial(env, case, record)
+        start = collect_start(env, index, case, 714290 + index + (10000 if label == "baseline" else 0))
+        row, state, expert_actions = start
         if state is None:
-            raise RuntimeError(f"Original expert did not reach the insertion start at {label}/{index}: {result}")
-        expert_actions = np.asarray(actions, dtype=np.float32)
+            raise RuntimeError(f"Original expert did not reach the insertion start at {label}/{index}: {row}")
         np.savez(folder / f"{index:03}.npz", physics=state, expert_actions=expert_actions)
-        row["expert_success"] = result["success"]
-        starts.append((row, state, expert_actions))
+        starts.append(start)
     offsets = np.array([row["tip_offset_mm"] for row, _, _ in starts])
     targets = np.array([row["case"]["target"] for row, _, _ in starts])
     save_json(folder / "manifest.json", dict(
@@ -151,12 +163,12 @@ class FrozenSmolVLA:
         return dict(ref_chunk=reference)
 
 
-def rollout(env, features, mapping, start, replay=None, *, expert=False):
+def rollout(env, features, mapping, start, replay=None, *, expert=False, actor=None):
     restore(env, start)
     row, _, expert_actions = start
     torch.manual_seed(row["seed"])
     features.policy.reset()
-    with_token = replay is not None
+    with_token = replay is not None or actor is not None
     obs = features.observe(env, mapping, with_token=with_token)
     done = False
     while not done:
@@ -165,6 +177,8 @@ def rollout(env, features, mapping, start, replay=None, *, expert=False):
             if not len(chunk):
                 raise RuntimeError("The expert continuation ended before termination")
             chunk = mapping.normalize(chunk)
+        elif actor is not None:
+            chunk = actor(obs)
         else:
             chunk = obs["ref_chunk"]
         reward = np.zeros(CHUNK, dtype=np.float32)
@@ -177,7 +191,7 @@ def rollout(env, features, mapping, start, replay=None, *, expert=False):
             done = bool(stopped or timeout or info["slipped"])
             if done:
                 break
-        if with_token:
+        if replay is not None:
             nxt = obs if done else features.observe(env, mapping, with_token=True)
             action = executed + [executed[-1]] * (CHUNK - len(executed))
             flags = np.arange(CHUNK) < len(executed) if expert else np.zeros(CHUNK, dtype=bool)
@@ -186,18 +200,19 @@ def rollout(env, features, mapping, start, replay=None, *, expert=False):
                 rewards=reward, dones=done, terminations=done, intervene_flags=flags, expert=expert))
             obs = nxt
         elif not done:
-            obs = features.observe(env, mapping, with_token=False)
+            obs = features.observe(env, mapping, with_token=with_token)
     return dict(index=row["index"], steps=env.steps, success=info["success"], slipped=info["slipped"],
                 penetration_failure=info["penetration_failure"])
 
 
-def collect_rollouts(env, features, mapping, starts, *, replay=None, expert=False):
+def collect_rollouts(env, features, mapping, starts, *, replay=None, expert=False, actor=None):
     started = time.perf_counter()
     rows = []
     for start in starts:
-        row = rollout(env, features, mapping, start, replay, expert=expert)
+        row = rollout(env, features, mapping, start, replay, expert=expert, actor=actor)
         rows.append(row)
-        print(json.dumps(dict(phase="expert" if expert else "baseline" if replay is None else "warmup",
+        print(json.dumps(dict(phase="expert" if expert else "actor-eval" if actor is not None
+                              else "baseline" if replay is None else "warmup",
                               **row)), flush=True)
     total = sum(row["steps"] for row in rows)
     return dict(episodes=len(rows), insertions=sum(row["success"] for row in rows),
