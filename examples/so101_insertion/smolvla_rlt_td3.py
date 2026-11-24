@@ -51,6 +51,11 @@ def batch_replay(replay, device):
     }
 
 
+def actor_delta_rad(policy, obs, actions):
+    predicted, _, _ = policy.sac_forward(obs, deterministic=True, apply_action_noise=False)
+    return (predicted.reshape_as(obs["ref_chunk"]) - obs["ref_chunk"]).abs()[..., :5] * actions.half[:5]
+
+
 def plot(rows, output):
     import matplotlib
 
@@ -71,7 +76,7 @@ def plot(rows, output):
     plt.close(figure)
 
 
-def update_td3(rlinf, actions, replay, output, *, updates=50, device="cuda"):
+def update_td3(rlinf, actions, replay, output, *, updates=50, device="cuda", offline_run=None):
     model_class, loss_mixin = load_rlinf(rlinf.resolve())
     template = yaml.safe_load(
         (rlinf / "examples/embodiment/config/maniskill_rlt_stage2_td3_mlp.yaml").read_text(encoding="utf-8")
@@ -79,6 +84,11 @@ def update_td3(rlinf, actions, replay, output, *, updates=50, device="cuda"):
     actor = template["actor"]
     alg = template["algorithm"]
     args = {key: actor["model"][key] for key in ("actor_noise_sigma", "mlp_hidden_dim", "mlp_num_hidden_layers")}
+    if offline_run is not None:
+        args["actor_noise_sigma"] = actions.sigma
+        schedule = alg["actor_weight_schedule"]
+        for key in ("warmup_updates", "ramp_updates"):
+            schedule[key] //= 10
     sample = replay[0]["curr_obs"]
     chunk, action_dim = sample["ref_chunk"].shape
     args.update(z_dim=sample["z_rl"].numel(), proprio_dim=sample["proprio"].numel(),
@@ -113,6 +123,15 @@ def update_td3(rlinf, actions, replay, output, *, updates=50, device="cuda"):
     loss.qf_optimizer = q_optim
 
     warm = batch_replay(replay, device)
+    if offline_run is not None:
+        saved_replay = {
+            key: {name: tensor.cpu() for name, tensor in value.items()} if isinstance(value, dict) else value.cpu()
+            for key, value in warm.items()
+        }
+        path = output / "replay.pt"
+        temporary = path.with_suffix(".tmp")
+        torch.save(saved_replay, temporary)
+        temporary.replace(path)
     with torch.no_grad():
         obs = {key: value[:actor["micro_batch_size"]] for key, value in warm["curr_obs"].items()}
         first, _, _ = policy.sac_forward(obs, deterministic=True, apply_action_noise=False)
@@ -157,8 +176,49 @@ def update_td3(rlinf, actions, replay, output, *, updates=50, device="cuda"):
                 raise RuntimeError(f"Nonfinite TD3 metric at update {step + 1}: {row}")
             rows.append(row)
             print(json.dumps(row), file=log)
-            if step == 0 or (step + 1) % 10 == 0:
+            if step == 0 or (step + 1) % (100 if offline_run is not None else 10) == 0:
                 print(json.dumps(row), flush=True)
+
+    if offline_run is not None:
+        path = output / "td3-offline.pt"
+        payload = dict(
+            model=policy.state_dict(), target=target.state_dict(), model_config=args, algorithm=loss.cfg.algorithm,
+            critic_optimizer=q_optim.state_dict(), actor_optimizer=actor_optim.state_dict(),
+            update_step=updates, run=offline_run, replay_path="replay.pt",
+            replay_rng=rng.getstate(), torch_rng=torch.random.get_rng_state(),
+            cuda_rng=torch.cuda.get_rng_state(device) if torch.device(device).type == "cuda" else None,
+        )
+        temporary = path.with_suffix(".tmp")
+        torch.save(payload, temporary)
+        temporary.replace(path)
+        saved = torch.load(path, map_location="cpu", weights_only=True)
+        reloaded = model_class(**saved["model_config"]).to(device).eval().requires_grad_(False)
+        reloaded.load_state_dict(saved["model"], strict=True)
+        target.load_state_dict(saved["target"], strict=True)
+        q_optim.load_state_dict(saved["critic_optimizer"])
+        actor_optim.load_state_dict(saved["actor_optimizer"])
+        restored_replay = torch.load(output / saved["replay_path"], map_location=device, weights_only=True)
+        for key in ("actions", "rewards", "dones"):
+            torch.testing.assert_close(restored_replay[key], warm[key], atol=0, rtol=0)
+        with torch.no_grad():
+            torch.testing.assert_close(actor_delta_rad(reloaded, obs, actions),
+                                       actor_delta_rad(policy, obs, actions), atol=0, rtol=0)
+            delta = actor_delta_rad(reloaded, restored_replay["curr_obs"], actions)
+        tail = rows[-100:]
+        avg = {key: float(np.mean([row[key] for row in tail if key in row]))
+               for key in ("critic_loss", "actor_loss", "bc_loss", "q_data", "q_pi")}
+        final_actor = next(row for row in reversed(rows) if "actor_loss" in row)
+        summary = dict(
+            critic_updates=updates, actor_updates=sum("actor_loss" in row for row in rows),
+            critic_loss=rows[-1]["critic_loss"], actor_loss=final_actor["actor_loss"],
+            actor_loss_step=final_actor["step"], last_100_critic_steps_mean=avg,
+            warmup_arm_mean_abs_rad=delta.mean().item(), warmup_arm_max_abs_rad=delta.max().item(),
+            reload_verified=True,
+        )
+        (output / "offline.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+        print(json.dumps(summary), flush=True)
+        plot(rows, output / "td3-curve.png")
+        return reloaded
 
     torch.save(dict(model=policy.state_dict(), target=target.state_dict(), model_config=args),
                output / "td3-smoke.pt")
