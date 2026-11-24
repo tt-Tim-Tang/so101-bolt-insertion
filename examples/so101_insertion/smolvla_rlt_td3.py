@@ -56,6 +56,68 @@ def actor_delta_rad(policy, obs, actions):
     return (predicted.reshape_as(obs["ref_chunk"]) - obs["ref_chunk"]).abs()[..., :5] * actions.half[:5]
 
 
+def learner(model_class, loss_mixin, actions, args, alg, actor, device):
+    chunk, action_dim = args["num_action_chunks"], args["action_dim"]
+    policy = model_class(**args).to(device)
+    target = deepcopy(policy).requires_grad_(False)
+
+    def q_gripper_lock(_module, inputs):
+        state, commands = inputs
+        return state, actions.lock(commands.reshape(-1, chunk, action_dim)).flatten(1)
+
+    for network in (policy, target):
+        network.q_head.register_forward_pre_hook(q_gripper_lock)
+
+    class Losses(loss_mixin):
+        torch_dtype = torch.float32
+
+        def _env_values(self, name, _index, _dtype):
+            return self.cfg.algorithm[name]
+
+    loss = Losses()
+    loss.cfg = SimpleNamespace(
+        actor=SimpleNamespace(model=SimpleNamespace(num_action_chunks=chunk, action_dim=action_dim)),
+        algorithm={**alg, "q_head_type": actor["model"]["q_head_type"]},
+    )
+    loss.model, loss.target_model = policy, target
+    loss.qf_optimizer = torch.optim.Adam(policy.q_head.parameters(), lr=actor["critic_optim"]["lr"])
+    return loss, torch.optim.Adam(policy.actor.parameters(), lr=actor["optim"]["lr"])
+
+
+def take_batch(value, indices):
+    if isinstance(value, dict):
+        return {key: take_batch(tensor, indices) for key, tensor in value.items()}
+    return value[indices]
+
+
+def train_step(loss, actor_optim, actor, batch, step):
+    policy, target, alg = loss.model, loss.target_model, loss.cfg.algorithm
+    q_optim = loss.qf_optimizer
+    loss.update_step = step
+    q_optim.zero_grad(set_to_none=True)
+    q_loss, q_stats = loss.forward_critic(batch)
+    q_loss.backward()
+    q_grad = torch.nn.utils.clip_grad_norm_(policy.q_head.parameters(), actor["critic_optim"]["clip_grad"],
+                                           error_if_nonfinite=True)
+    q_optim.step()
+    row = dict(step=step + 1, critic_loss=q_loss.item(), q_grad=q_grad.item(), **q_stats)
+    if step % alg["critic_actor_ratio"] == 0:
+        actor_optim.zero_grad(set_to_none=True)
+        objective, _, stats = loss.forward_actor(batch)
+        objective.backward()
+        grad = torch.nn.utils.clip_grad_norm_(policy.actor.parameters(), actor["optim"]["clip_grad"],
+                                              error_if_nonfinite=True)
+        actor_optim.step()
+        row.update(actor_loss=objective.item(), actor_grad=grad.item(), **stats)
+    if step % alg["target_update_freq"] == 0:
+        with torch.no_grad():
+            for dst, src in zip(target.parameters(), policy.parameters(), strict=True):
+                dst.lerp_(src, alg["tau"])
+    if not all(np.isfinite(value) for value in row.values()):
+        raise RuntimeError(f"Nonfinite TD3 metric at update {step + 1}: {row}")
+    return row
+
+
 def plot(rows, output):
     import matplotlib
 
@@ -95,32 +157,8 @@ def update_td3(rlinf, actions, replay, output, *, updates=50, device="cuda", off
                 action_dim=action_dim, num_action_chunks=chunk, ref_num_action_chunks=chunk)
     torch.manual_seed(actor["seed"])
     rng = random.Random(actor["seed"])
-    policy = model_class(**args).to(device)
-    target = deepcopy(policy).requires_grad_(False)
-
-    def q_gripper_lock(_module, inputs):
-        state, commands = inputs
-        # Q sees the attainable action, just as it does for recorded commands.
-        return state, actions.lock(commands.reshape(-1, chunk, action_dim)).flatten(1)
-
-    for network in (policy, target):
-        network.q_head.register_forward_pre_hook(q_gripper_lock)
-
-    class Losses(loss_mixin):
-        torch_dtype = torch.float32
-
-        def _env_values(self, name, _index, _dtype):
-            return self.cfg.algorithm[name]
-
-    loss = Losses()
-    loss.cfg = SimpleNamespace(
-        actor=SimpleNamespace(model=SimpleNamespace(num_action_chunks=chunk, action_dim=action_dim)),
-        algorithm={**alg, "q_head_type": actor["model"]["q_head_type"]},
-    )
-    loss.model, loss.target_model = policy, target
-    q_optim = torch.optim.Adam(policy.q_head.parameters(), lr=actor["critic_optim"]["lr"])
-    actor_optim = torch.optim.Adam(policy.actor.parameters(), lr=actor["optim"]["lr"])
-    loss.qf_optimizer = q_optim
+    loss, actor_optim = learner(model_class, loss_mixin, actions, args, alg, actor, device)
+    policy, target, q_optim = loss.model, loss.target_model, loss.qf_optimizer
 
     warm = batch_replay(replay, device)
     if offline_run is not None:
@@ -143,37 +181,11 @@ def update_td3(rlinf, actions, replay, output, *, updates=50, device="cuda", off
     (output / "actor-initial.json").write_text(json.dumps(initial, indent=2), encoding="utf-8")
     print(json.dumps(initial), flush=True)
 
-    def take(value, indices):
-        if isinstance(value, dict):
-            return {key: take(tensor, indices) for key, tensor in value.items()}
-        return value[indices]
-
     rows = []
     with (output / "td3-curve.jsonl").open("x", encoding="utf-8", buffering=1) as log:
         for step in range(updates):
-            loss.update_step = step
             indices = rng.choices(range(len(replay)), k=actor["global_batch_size"])
-            batch = take(warm, indices)
-            q_optim.zero_grad(set_to_none=True)
-            q_loss, q_stats = loss.forward_critic(batch)
-            q_loss.backward()
-            q_grad = torch.nn.utils.clip_grad_norm_(policy.q_head.parameters(), actor["critic_optim"]["clip_grad"],
-                                                   error_if_nonfinite=True)
-            q_optim.step()
-            row = dict(step=step + 1, critic_loss=q_loss.item(), q_grad=q_grad.item(), **q_stats)
-            if step % alg["critic_actor_ratio"] == 0:
-                actor_optim.zero_grad(set_to_none=True)
-                objective, _, stats = loss.forward_actor(batch)
-                objective.backward()
-                grad = torch.nn.utils.clip_grad_norm_(policy.actor.parameters(), actor["optim"]["clip_grad"],
-                                                      error_if_nonfinite=True)
-                actor_optim.step()
-                row.update(actor_loss=objective.item(), actor_grad=grad.item(), **stats)
-            with torch.no_grad():
-                for dst, src in zip(target.parameters(), policy.parameters(), strict=True):
-                    dst.lerp_(src, alg["tau"])
-            if not all(np.isfinite(value) for value in row.values()):
-                raise RuntimeError(f"Nonfinite TD3 metric at update {step + 1}: {row}")
+            row = train_step(loss, actor_optim, actor, take_batch(warm, indices), step)
             rows.append(row)
             print(json.dumps(row), file=log)
             if step == 0 or (step + 1) % (100 if offline_run is not None else 10) == 0:
