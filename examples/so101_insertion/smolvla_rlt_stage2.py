@@ -163,14 +163,16 @@ class FrozenSmolVLA:
         return dict(ref_chunk=reference)
 
 
-def rollout(env, features, mapping, start, replay=None, *, expert=False, actor=None):
+def rollout(env, features, mapping, start, replay=None, *, expert=False, actor=None, on_transition=None):
     restore(env, start)
     row, _, expert_actions = start
     torch.manual_seed(row["seed"])
     features.policy.reset()
-    with_token = replay is not None or actor is not None
+    record = replay is not None or on_transition is not None
+    with_token = record or actor is not None
     obs = features.observe(env, mapping, with_token=with_token)
     done = False
+    budget_exhausted = False
     while not done:
         if expert:
             chunk = torch.as_tensor(expert_actions[env.steps:env.steps + CHUNK], device="cuda")
@@ -191,18 +193,23 @@ def rollout(env, features, mapping, start, replay=None, *, expert=False, actor=N
             done = bool(stopped or timeout or info["slipped"])
             if done:
                 break
-        if replay is not None:
+        if record:
             nxt = obs if done else features.observe(env, mapping, with_token=True)
             action = executed + [executed[-1]] * (CHUNK - len(executed))
             flags = np.arange(CHUNK) < len(executed) if expert else np.zeros(CHUNK, dtype=bool)
-            replay.append(dict(curr_obs=obs, next_obs=nxt, actions=mapping.normalize(
+            transition = dict(curr_obs=obs, next_obs=nxt, actions=mapping.normalize(
                 torch.as_tensor(np.array(action), dtype=torch.float32, device="cuda")),
-                rewards=reward, dones=done, terminations=done, intervene_flags=flags, expert=expert))
+                rewards=reward, dones=done, terminations=done, intervene_flags=flags, expert=expert)
+            if replay is not None:
+                replay.append(transition)
+            if on_transition is not None and on_transition(transition):
+                budget_exhausted = not done
+                break
             obs = nxt
         elif not done:
             obs = features.observe(env, mapping, with_token=with_token)
     return dict(index=row["index"], steps=env.steps, success=info["success"], slipped=info["slipped"],
-                penetration_failure=info["penetration_failure"])
+                penetration_failure=info["penetration_failure"], budget_exhausted=budget_exhausted)
 
 
 def collect_rollouts(env, features, mapping, starts, *, replay=None, expert=False, actor=None):
