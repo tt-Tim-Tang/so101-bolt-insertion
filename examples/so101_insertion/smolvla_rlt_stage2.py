@@ -146,7 +146,7 @@ class FrozenSmolVLA:
                 z = self.token.encode_flat(prefix, mask)[0].float()
         reference = actions.normalize(self.post(reference.float())[0])
         if with_token:
-            return dict(z_rl=z, proprio=proprio.cuda(), ref_chunk=reference)
+            return dict(z_rl=z, proprio=batch["observation.state"][0].float(), ref_chunk=reference)
         return dict(ref_chunk=reference)
 
 
