@@ -133,10 +133,10 @@ def baseline(env, features, mapping, starts, limits, output):
     return results
 
 
-def calibrate(env, mapping, starts, eval_folder, limits, mode, output):
+def calibrate(env, mapping, starts, eval_folder, limits, mode, output,
+              sigmas=(0.025, 0.05, 0.075, 0.10, 0.15, 0.20)):
     low, high = mapping.low.cpu().numpy()[:5], mapping.high.cpu().numpy()[:5]
     n_seeds = 48
-    sigmas = (0.025, 0.05, 0.075, 0.10, 0.15, 0.20)
     samples = np.random.default_rng(723).standard_normal((n_seeds, CHUNK, 5))
     shifts = {sigma: [] for sigma in sigmas}
     zero = np.zeros((CHUNK, 5))
