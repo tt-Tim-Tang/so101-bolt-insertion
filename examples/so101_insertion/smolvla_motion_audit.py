@@ -217,13 +217,13 @@ def noise_probe(features, inputs, chunk_id, destination):
                zero_repeat_max_difference_rad=float(np.abs(angles[-1] - angles[-2]).max())))
 
 
-def rollout(case, expert, observed, features, seed, out):
+def rollout(case, expert, observed, features, seed, out, *, record_inputs=True):
     import cv2
     import torch
 
     out.mkdir()
     inputs = out / "inputs"
-    if features is not None:
+    if features is not None and record_inputs:
         inputs.mkdir()
     env = TraceInsertion()
     env.start(case)
@@ -248,8 +248,8 @@ def rollout(case, expert, observed, features, seed, out):
                     batch.update(task=obs["task"], **{"observation.state": torch.from_numpy(obs["observation.state"])})
                     processed = features.pre(batch)
                     current = len(chunks)
-                    meta = save_input(inputs, obs, processed, current)
-                    if "target_contact" not in env.events:
+                    meta = save_input(inputs, obs, processed, current) if record_inputs else {"task": obs["task"]}
+                    if record_inputs and "target_contact" not in env.events:
                         probe = (current, {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in processed.items()})
                     prediction = features.policy.predict_action_chunk(processed)
                     target = features.post(prediction.float())
