@@ -96,8 +96,11 @@ class SmolVLAInsertion(WideInsertion):
         self.open_count += int(opened and not self.was_open)
         self.was_open = opened
         losing_grasp = self.pick and not success and not opened and not jaws and self.highest_lift - lift > .01
-        self.drop_ticks = self.drop_ticks + 1 if losing_grasp else 0
-        self.slip_count += int(self.drop_ticks == ceil(.2 * FPS))
+        if not losing_grasp:
+            self.drop_ticks = 0
+        elif self.seated_ticks == 0:
+            self.drop_ticks += 1
+            self.slip_count += int(self.drop_ticks == ceil(.2 * FPS))
         info.update(success=bool(success), pickup=bool(self.pick), arrival=bool(self.arrive), phase=self.phase,
                     opened_early=self.open_count, slipped=self.slip_count,
                     penetration_failure=penetration, max_penetration_mm=self.max_penetration * 1000,
