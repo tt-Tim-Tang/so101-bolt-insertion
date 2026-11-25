@@ -52,7 +52,7 @@ def episode_result(info, timeout, done):
     return {key: info[key] for key in OUTCOMES if key != "timeout"} | {"timeout": bool(timeout and not done)}
 
 
-def handoff(env, features, case, seed):
+def handoff(env, features, case, seed, *, frame=None):
     """Run the same five-command prefix and capture the first eligible boundary."""
     env.max_steps = 20 * FPS
     env.start(case)
@@ -76,11 +76,14 @@ def handoff(env, features, case, seed):
         if env.first_contact is not None:
             return None, "Contact occurred before a valid 15 mm handoff"
         raw = env.observation()
+        frame_observation = raw
         for command in features.predict_reference(features.preprocess_observation(raw)).cpu().numpy():
+            if frame is not None:
+                frame(frame_observation)
             _, done, timeout, _ = env.step(command)
             if done or timeout:
                 return None, "The prefix terminated before a valid 15 mm handoff"
-            env.observation()
+            frame_observation = env.observation()
 
 
 def restore_handoff(env, features, snapshot):

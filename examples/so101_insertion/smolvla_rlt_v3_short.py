@@ -70,9 +70,11 @@ def scale_probe(env, features, mapping, actor, snapshot):
                 p95_mm=float(np.quantile(distances, .95)), max_mm=max(distances), samples_mm=distances)
 
 
-def rollout(env, features, mapping, actor, snapshot, *, flow_seed=None, explore=None, transition=None):
+def rollout(env, features, mapping, actor, snapshot, *, flow_seed=None, explore=None, transition=None,
+            live_handoff=False, frame=None):
     with torch.random.fork_rng(devices=[torch.cuda.current_device()]):
-        restore_handoff(env, features, snapshot)
+        if not live_handoff:
+            restore_handoff(env, features, snapshot)
         if flow_seed is not None:
             torch.cuda.manual_seed(flow_seed)
         start_step = env.steps
@@ -82,12 +84,15 @@ def rollout(env, features, mapping, actor, snapshot, *, flow_seed=None, explore=
             data = features.observe(env, mapping, with_token=True, include_physical_reference=True)
             return data, data.pop("reference_rad").cpu().numpy().astype(np.float64)
 
+        if frame is not None:
+            frame(env.observation())
         obs, raw = observe()
         unit_actions = getattr(actor, "critic_in_residual_space", False)
         if unit_actions:
             eps_rad = (actor.actor.residual_eps_norm.reshape_as(obs["ref_chunk"]) * mapping.half).cpu().numpy()
         budget = done = False
         residuals = []
+        peak_residual = 0.
         while not done and not budget:
             with torch.no_grad():
                 ref = obs["ref_chunk"]
@@ -97,6 +102,7 @@ def rollout(env, features, mapping, actor, snapshot, *, flow_seed=None, explore=
                     anchor = np.clip(raw, env.low, env.high)
                     delta = action.cpu().numpy() * eps_rad
                     residuals.append(float(np.abs(delta[:, :5]).mean()))
+                    peak_residual = max(peak_residual, float(np.abs(delta[:, :5]).max()))
                     commands = anchor + delta
                     commands[:, -1] = GRIP
                 else:
@@ -110,6 +116,10 @@ def rollout(env, features, mapping, actor, snapshot, *, flow_seed=None, explore=
                 done = bool(stopped or timeout or info["slipped"])
                 if done:
                     break
+                if live_handoff:
+                    pixels = env.observation()
+                    if frame is not None:
+                        frame(pixels)
             next_obs, next_raw = (obs, raw) if done else observe()
             if transition is not None:
                 if unit_actions:
@@ -125,10 +135,13 @@ def rollout(env, features, mapping, actor, snapshot, *, flow_seed=None, explore=
                 budget = bool(transition(dict(curr_obs=obs, next_obs=next_obs, actions=measured, rewards=rewards,
                                               dones=done, terminations=done, intervene_flags=np.zeros(CHUNK, bool))))
             obs, raw = next_obs, next_raw
+        if frame is not None:
+            frame(env.observation())
         return dict(success=bool(info["success"]), slip=int(info["slipped"]), timeout=bool(timeout and not stopped),
                     penetration=bool(info["penetration_failure"]), steps=env.steps-start_step, chunks=len(residuals),
                     deepest_held_mm=env.max_near_depth_mm, stable_s=info["stable_s"],
-                    mean_residual_rad=float(np.mean(residuals)), budget_truncated=bool(budget and not done))
+                    mean_residual_rad=float(np.mean(residuals)), max_residual_rad=peak_residual,
+                    budget_truncated=bool(budget and not done))
 
 
 def assessments(env, features, mapping, actor, starts):
