@@ -283,6 +283,7 @@ def rollout(case, expert, observed, features, seed, out):
         controls, physics, contacts = map(columns, (env.control, env.physics, env.contacts))
         controls["phase"] = phase_at(controls["t_pre_s"], env.events)
         physics["phase"] = phase_at(physics["solver_time_s"], env.events)
+        physics["state_phase"] = phase_at(physics["state_time_s"], env.events)
         for name, arrays in (("control", controls), ("physics", physics), ("contacts", contacts)):
             np.savez_compressed(out / f"{name}.npz", **arrays)
             write_csv(out / f"{name}.csv", arrays)

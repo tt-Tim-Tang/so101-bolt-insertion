@@ -56,7 +56,7 @@ def phase_metrics(control, diffs, phase):
         "joint_vel_sign_reversals": dict(zip(JOINTS, reverse[two[1:]].sum(axis=0).tolist(), strict=True)),
         "tracking_pre_rad": joint_stats(control["ctrl_error_pre"][here]),
         "tracking_post_rad": joint_stats(control["ctrl_error_post"][here]),
-        "ee_jerk_m_per_s3": stats(np.linalg.norm(diffs["ee_jerk"][four], axis=1)),
+        "ee_jerk_m_per_s3": stats(np.linalg.norm(diffs["ee_jerk"][three], axis=1)),
         "clipped_steps": int(np.any(control["target"][here] != control["ctrl"][here], axis=1).sum()),
         "clip_delta_rad": joint_stats((control["ctrl"] - control["target"])[here]),
         "step_mod_5": {},
@@ -96,15 +96,18 @@ def seams_and_overlap(out, control, chunks, dt):
     for i, start in enumerate(starts[1:], 1):
         row = dict(step=int(start), time_s=float(times[start]), phase=labels[start])
         for name, values in (("target", control["target"]), ("sent", control["ctrl"]),
-                             ("actual", control["post_qpos"]), ("ee", control["post_ee_pos"])):
+                             ("actual", control["post_qpos"])):
             before = values[start-1] - values[start-2]
             after = values[start] - values[start-1]
             row[f"{name}_jump_norm"] = np.linalg.norm(after[:5])
             row[f"{name}_arm_direction_cos"] = cosine(before[:5], after[:5])
-            if name != "ee":
-                row[f"{name}_gripper_jump_rad"] = abs(after[5])
-                row[f"{name}_gripper_direction_cos"] = cosine(before[5:], after[5:])
-                row.update({f"{name}_jump_rad.{joint}": after[j] for j, joint in enumerate(JOINTS)})
+            row[f"{name}_gripper_jump_rad"] = abs(after[5])
+            row[f"{name}_gripper_direction_cos"] = cosine(before[5:], after[5:])
+            row.update({f"{name}_jump_rad.{joint}": after[j] for j, joint in enumerate(JOINTS)})
+        xyz = control["post_ee_pos"]
+        before, after = xyz[start-1] - xyz[start-2], xyz[start] - xyz[start-1]
+        row["ee_jump_m"] = np.linalg.norm(after)
+        row["ee_direction_cos"] = cosine(before, after)
         seam_rows.append(row)
         offset = int(start - starts[i-1])
         for j in range(len(predictions[i-1]) - offset):
@@ -122,10 +125,12 @@ def seams_and_overlap(out, control, chunks, dt):
         events = [r for r in seam_rows if r["phase"] == name]
         overlap = np.array([[r[j] for j in JOINTS] for r in overlap_rows if r["phase"] == name]).reshape(-1, 6)
         selected = predictions[labels[starts] == name]
+        selected_normalized = chunks["normalized"][labels[starts] == name]
         by_phase[name] = dict(
             boundaries=len(events), same_future_disagreement_rad=joint_stats(overlap),
             full_forecast_accel=joint_stats((np.diff(selected, n=2, axis=1)/dt**2).reshape(-1, 6)),
             full_forecast_jerk=joint_stats((np.diff(selected, n=3, axis=1)/dt**3).reshape(-1, 6)),
+            normalized_full_forecast_jerk=joint_stats((np.diff(selected_normalized, n=3, axis=1)/dt**3).reshape(-1, 6)),
             arm_position_jump_rad=stats([r["target_jump_norm"] for r in events]),
             arm_direction_cos=[float(r["target_arm_direction_cos"]) if np.isfinite(r["target_arm_direction_cos"]) else None
                                for r in events],
@@ -138,7 +143,8 @@ def spectrum(out, control, physics, dt, physics_dt):
     for stream, trace, key, period in (("control", control, "post_qvel", dt),
                                        ("physics", physics, "qvel", physics_dt)):
         for phase in PHASES:
-            x = trace[key][trace["phase"] == phase]
+            phase_key = "state_phase" if stream == "physics" else "phase"
+            x = trace[key][trace[phase_key] == phase]
             if len(x) < 8:
                 continue
             window = np.hanning(len(x))[:, None]
@@ -263,6 +269,19 @@ def plot(out, ctl, phys, contacts, reference, info, derived, chunks, spectral_ro
     ax[0, 0].legend(fontsize=7)
     save(fig, "physics-forces")
 
+    fig, axes = plt.subplots(6, 3, figsize=(13, 13), sharex=True)
+    physics_jerk = finite_difference(phys["qacc"], info["physics_dt"], 1)
+    for j, row in enumerate(axes):
+        for axis, (t, values, title, unit) in zip(row, (
+                (phys["state_time_s"], phys["qvel"], "velocity", "rad/s"),
+                (physics_t, phys["qacc"], "acceleration", "rad/s²"),
+                (physics_t, physics_jerk, "jerk", "rad/s³"),
+        ), strict=True):
+            axis.plot(t, values[:, j], lw=.8)
+            axis.set(title=f"{JOINTS[j]} {title}", ylabel=unit)
+            decorate(axis)
+    save(fig, "physics-joint-derivatives")
+
     fig, ax = plt.subplots(4, 1, figsize=(11, 9), sharex=True)
     ax[0].plot(pre, ctl["ctrl"][:, -1], label="Gripper command")
     ax[0].plot(post, ctl["post_qpos"][:, -1], label="Gripper actual")
@@ -328,10 +347,16 @@ def analyze(out: Path, expert: Path):
             derived[f"{stream}_{name}"] = finite_difference(vec, dt, order)
     np.savez_compressed(out / "derivatives.npz", t_pre_s=ctl["t_pre_s"], t_post_s=ctl["t_post_s"], **derived)
     phases = {phase: phase_metrics(ctl, derived, phase) for phase in PHASES}
+    jerk = finite_difference(phys["qacc"], info["physics_dt"], 1)
     for phase in PHASES:
-        phase_key = (phys["phase"] == phase) & same_history(phys["phase"], 2)
-        jerk = finite_difference(phys["qacc"], info["physics_dt"], 1)
-        phases[phase]["physics_jerk_from_qacc"] = joint_stats(jerk[phase_key])
+        phase_key = phys["phase"] == phase
+        phases[phase]["physics_jerk_from_qacc"] = joint_stats(jerk[phase_key & same_history(phys["phase"], 2)])
+        for field in ("actuator_force", "qfrc_actuator", "qfrc_constraint"):
+            phases[phase][field] = joint_stats(phys[field][phase_key])
+        if contacts:
+            chosen = contacts["bolt_target"] & phase_key[contacts["substep"]]
+            phases[phase]["bolt_target_normal_force_n"] = stats(contacts["force_contact"][chosen, 0])
+            phases[phase]["bolt_target_penetration_m"] = stats(contacts["penetration_m"][chosen])
     chunks = None
     comparisons = {}
     if (out / "chunks.npz").exists():
