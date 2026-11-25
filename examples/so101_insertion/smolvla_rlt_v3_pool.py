@@ -66,7 +66,8 @@ def run(args):
     env = EpisodeTelemetry(penetration_limit_mm=3.)
     rows = []
     try:
-        for index, case in enumerate(train):
+        for index in range(args.start, args.stop):
+            case = train[index]
             stem = args.output / f"{index:03d}"
             metadata = stem.with_suffix(".json")
             if metadata.is_file():
@@ -99,6 +100,12 @@ def run(args):
                   row["seed"], row["reference"]["steps"], flush=True)
     finally:
         env.close()
+    if (args.start, args.stop) != (0, len(train)):
+        return
+    summarize(args.output, rows)
+
+
+def summarize(output, rows):
     starts = [r for r in rows if r["snapshot"] is not None]
     result = dict(train_holes=len(rows), validation_holes=10, heldout_holes=30, overlap_holes=0,
                   valid_handoffs=len(starts), rejected_indices=[r["index"] for r in rows if r["snapshot"] is None],
@@ -107,7 +114,7 @@ def run(args):
                   base_fail=sum(r["group"] == "base_fail" for r in rows),
                   crossing_xy_mm=quantiles([r["snapshot"]["crossing"]["xy_mm"] for r in starts]),
                   handoff_xy_mm=quantiles([r["handoff_xy_mm"] for r in starts]), rows=rows)
-    save_json(args.output / "manifest.json", result)
+    save_json(output / "manifest.json", result)
     print("EXPORT_COMPLETE", {k: v for k, v in result.items() if k != "rows"}, flush=True)
 
 
@@ -115,7 +122,20 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for key in ("checkpoint", "episodes", "baseline", "splits", "output"):
         parser.add_argument(f"--{key}", type=Path, required=True)
-    run(parser.parse_args())
+    parser.add_argument("--start", type=int, default=0)
+    parser.add_argument("--stop", type=int, default=150)
+    parser.add_argument("--merge-only", action="store_true")
+    args = parser.parse_args()
+    if args.merge_only:
+        _, train, _ = fixed_cases(args)
+        rows = [json.loads((args.output / f"{i:03d}.json").read_text()) for i in range(len(train))]
+        if [(r["index"], r["case"]) for r in rows] != list(enumerate(train)):
+            raise ValueError("Exported rows differ from the training split")
+        summarize(args.output, rows)
+    else:
+        if not 0 <= args.start < args.stop <= 150:
+            parser.error("Expected a nonempty range inside the 150 training holes")
+        run(args)
 
 
 if __name__ == "__main__":
