@@ -53,9 +53,10 @@ def paired_panel(ax, pairs, fields, *, ylabel, title):
                         xytext=(7, -3 if mode == "corrected" else 3), textcoords="offset points", color=color,
                         fontsize=9)
         ticks.extend(x.tolist())
-        labels.extend([f"{name}\nOriginal", f"{name}\nCorrected"])
+        prefix = f"{name}\n" if name else ""
+        labels.extend([f"{prefix}Original", f"{prefix}Corrected"])
     ax.set(title=title, ylabel=ylabel, xticks=ticks, xticklabels=labels,
-           xlim=(-.45, ticks[-1] + .58), ylim=(0, None))
+           xlim=(-.45, ticks[-1] + .58), ylim=(0, ax.get_ylim()[1] * 1.1))
 
 
 def main():
@@ -97,10 +98,10 @@ def main():
     handles, labels = axes[0, 0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="upper left", bbox_to_anchor=(.073, .914), ncol=3, frameon=False, fontsize=9)
 
-    paired_panel(axes[1, 0], pairs, (("Wrist", "wrist_step_mm", "p95"),),
+    paired_panel(axes[1, 0], pairs, (("", "wrist_step_mm", "p95"),),
                  ylabel="mm per 40 ms step", title="Wrist displacement P95 · all three seeds")
-    paired_panel(axes[1, 1], pairs, (("Within chunk", "within_chunk_target_jerk", "rms"),
-                                     ("Across chunks", "cross_chunk_target_jerk", "rms")),
+    paired_panel(axes[1, 1], pairs, (("Within", "within_chunk_target_jerk", "rms"),
+                                     ("Across", "cross_chunk_target_jerk", "rms")),
                  ylabel="rad/s³", title="Five-axis target joint jerk RMS · all three seeds")
     for ax in axes.flat:
         ax.grid(axis="y", alpha=.24)
