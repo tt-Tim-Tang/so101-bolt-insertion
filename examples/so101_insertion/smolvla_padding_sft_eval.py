@@ -70,29 +70,38 @@ def main():
     parser.add_argument("splits", type=Path)
     parser.add_argument("original_summary", type=Path)
     parser.add_argument("output", type=Path)
+    parser.add_argument("--videos-only", action="store_true", help="Render videos from a completed pairs.jsonl")
     args = parser.parse_args()
     cases = json.loads(args.splits.read_text())["validation"]
     historical = json.loads(args.original_summary.read_text())
     seed_base = historical["rollout_seed"] + 10_000
     penetration = historical["penetration_limit_mm"]
-    args.output.mkdir()
+    if not args.videos_only:
+        args.output.mkdir()
     features = FrozenSmolVLA(args.checkpoint)
     env = SmolVLAInsertion(penetration_limit_mm=penetration)
     rows = []
     try:
-        with (args.output / "pairs.jsonl").open("x", buffering=1) as log:
-            for i, case in enumerate(cases):
-                seed = seed_base + i
-                native, native_noise = replay(env, features, case, seed, False)
-                corrected, corrected_noise = replay(env, features, case, seed, True)
-                common = min(len(native_noise), len(corrected_noise))
-                np.testing.assert_array_equal(native_noise[:common], corrected_noise[:common])
-                row = dict(index=i, target=case["target"], seed=seed, matched_noise_chunks=common,
-                           native=native, corrected=corrected)
-                rows.append(row)
-                print(json.dumps(row), file=log)
-                print(f"VALIDATION {i}: insertion {int(native['success'])} -> {int(corrected['success'])}, "
-                      f"wrist P95 {native['wrist_p95_mm']:.2f} -> {corrected['wrist_p95_mm']:.2f} mm", flush=True)
+        pairs_path = args.output / "pairs.jsonl"
+        if args.videos_only:
+            rows = [json.loads(line) for line in pairs_path.read_text().splitlines()]
+            expected = [(i, case["target"], seed_base + i) for i, case in enumerate(cases)]
+            if [(r["index"], r["target"], r["seed"]) for r in rows] != expected:
+                raise ValueError("Saved evaluation pairs are incomplete or do not match the split")
+        else:
+            with pairs_path.open("x", buffering=1) as log:
+                for i, case in enumerate(cases):
+                    seed = seed_base + i
+                    native, native_noise = replay(env, features, case, seed, False)
+                    corrected, corrected_noise = replay(env, features, case, seed, True)
+                    common = min(len(native_noise), len(corrected_noise))
+                    np.testing.assert_array_equal(native_noise[:common], corrected_noise[:common])
+                    row = dict(index=i, target=case["target"], seed=seed, matched_noise_chunks=common,
+                               native=native, corrected=corrected)
+                    rows.append(row)
+                    print(json.dumps(row), file=log)
+                    print(f"VALIDATION {i}: insertion {int(native['success'])} -> {int(corrected['success'])}, "
+                          f"wrist P95 {native['wrist_p95_mm']:.2f} -> {corrected['wrist_p95_mm']:.2f} mm", flush=True)
 
         def video_rank(row):
             before, after = row["native"], row["corrected"]
@@ -100,17 +109,22 @@ def main():
                     before["wrist_p95_mm"] - after["wrist_p95_mm"])
 
         selected = max(rows, key=video_rank)
+        video_outcomes = {}
+        video_noises = []
         for mode in ("native", "corrected"):
-            outcome, _ = replay(env, features, cases[selected["index"]], selected["seed"], mode == "corrected",
-                                args.output / f"{mode}.mp4")
-            if outcome != selected[mode]:
-                raise RuntimeError(f"Video replay differs for validation {selected['index']}, {mode}")
+            outcome, noise = replay(env, features, cases[selected["index"]], selected["seed"], mode == "corrected",
+                                    args.output / f"{mode}.mp4")
+            video_outcomes[mode] = outcome
+            video_noises.append(noise)
+            print("VIDEO", mode, json.dumps(outcome), flush=True)
+        common = min(map(len, video_noises))
+        np.testing.assert_array_equal(video_noises[0][:common], video_noises[1][:common])
 
         metrics = ("pickup", "arrival", "success", "slipped", "opened_early", "penetration_failure", "timeout")
         summary = dict(checkpoint=str(args.checkpoint), original=historical["validation"],
                        episodes=len(cases), penetration_limit_mm=penetration, control_hz=FPS, seed_base=seed_base,
                        video_index=selected["index"], video_selection="Prioritize a gained insertion, then wrist P95 reduction",
-                       pairs=rows)
+                       videos=dict(outcomes=video_outcomes, matched_noise_chunks=common), pairs=rows)
         for mode in ("native", "corrected"):
             group = [row[mode] for row in rows]
             summary[mode] = {key: sum(r[key] for r in group) for key in metrics}
