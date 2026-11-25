@@ -167,7 +167,7 @@ def run(args):
                     if passed:
                         break
         if not gates[-1]["passed"]:
-            raise RuntimeError("Critic-only warmup did not separate outcomes; Actor stayed frozen")
+            raise RuntimeError("Critic-only Q gate failed; Actor stayed frozen. See critic-gate.json.")
         policy.actor.requires_grad_(True)
         # Match the warm Critic scale at a unit residual RMS of 0.25 rather than at the identically-zero Actor.
         bc_weight = q_weight * gates[-1]["mean_abs_actor_q"] / (.25**2)
