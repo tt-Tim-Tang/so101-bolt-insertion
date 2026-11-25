@@ -32,6 +32,10 @@ class Exploration:
         ref = obs["ref_chunk"]
         _, _, unit = policy.sac_forward({k: v.unsqueeze(0) for k, v in obs.items()}, return_residual_u=True,
                                        deterministic=True, apply_action_noise=False)
+        if policy.critic_in_residual_space:
+            if self.mode != "block" or policy.actor.sigma != self.sigma:
+                raise ValueError("Unit-residual exploration requires the calibrated block noise")
+            return (policy.actor.add_block_unit_noise(unit, generator=self.rng) if noisy else unit).reshape_as(ref)
         eps = policy.actor.residual_eps_norm.reshape_as(ref)
         shape = (1 if self.mode == "block" else CHUNK, ref.shape[-1])
         noise = torch.randn(shape, generator=self.rng, device=ref.device) * self.sigma if noisy else 0.
@@ -72,13 +76,44 @@ def q_by_outcome(policy, replay, labels, mapping):
                     below_0=float((values < 0).float().mean()),
                     below_minus_03=float((values < -.03).float().mean()), above_1=float((values > 1).float().mean()))
 
-    residual = (action.reshape_as(obs["ref_chunk"]) - obs["ref_chunk"])[..., :5] * mapping.half[:5]
+    reference = obs["ref_chunk"]
+    if policy.critic_in_residual_space:
+        normalized_delta = action.reshape_as(reference) * policy.actor.residual_eps_norm.reshape(1, *reference.shape[1:])
+    else:
+        normalized_delta = action.reshape_as(reference) - reference
+    residual = normalized_delta[..., :5] * mapping.half[:5]
     return dict(positive_trajectory={"replay_q": stats(data_q, mask), "actor_q": stats(actor_q, mask)},
                 negative_trajectory={"replay_q": stats(data_q, ~mask), "actor_q": stats(actor_q, ~mask)},
                 positive_reward_block_q=stats(data_q, positive), mean_abs_actor_q=float(actor_q.abs().mean()),
                 mean_actor_q=float(actor_q.mean()), mean_residual_rad=float(residual.abs().mean()),
                 max_residual_rad=float(residual.abs().max()),
                 unit_bc=float(unit.square().mean()))
+
+
+@torch.no_grad()
+def scan_unit_critic(policy, obs):
+    ref = obs["ref_chunk"]
+    grid = torch.linspace(-1, 1, 101, device=ref.device)
+    scans = []
+
+    def values(unit):
+        fixed = {k: v.expand(len(unit), *v.shape[1:]) for k, v in obs.items()}
+        return policy.sac_q_forward(fixed, unit).min(-1).values
+
+    for i in range(-1, ref.shape[-1] - 1):
+        u = ref.new_zeros(len(grid), *ref.shape[1:])
+        if i == -1:
+            u[..., :-1] = grid[:, None, None]
+        else:
+            u[..., i] = grid[:, None]
+        q = values(u)
+        scans.append(dict(axis="all" if i == -1 else i, q=q.tolist(), span=float(q.max() - q.min()), q_ref=float(q[50])))
+    generator = torch.Generator(device=ref.device).manual_seed(66)
+    u = torch.rand(1024, *ref.shape[1:], device=ref.device, generator=generator) * 2 - 1
+    u[..., -1] = 0
+    q = values(u)
+    return dict(index=66, u=grid.tolist(), scans=scans, max_scan_span=max(x["span"] for x in scans),
+                random_scan=dict(n=len(u), minimum=float(q.min()), maximum=float(q.max()), span=float(q.max() - q.min())))
 
 
 def run(args):
@@ -93,11 +128,15 @@ def run(args):
     _, train = read_cases(args.episodes, args.baseline, args.splits)
     args.output.mkdir()
     cfg = json.loads(args.gate.read_text())["actor_config"]
+    if args.residual_critic:
+        cfg.update(critic_in_residual_space=True, actor_noise_sigma=sigma)
     defaults = yaml.safe_load((args.rlinf / "examples/embodiment/config/maniskill_rlt_stage2_td3_mlp.yaml").read_text())
     actor_cfg, alg = defaults["actor"], defaults["algorithm"]
     q_weight = alg["actor_weight_schedule"]["online_q_weight"]
     alg.update(actor_weight_schedule={"enable": False}, reference_dropout_prob=0.,
                residual_unit_bc=True, bc_weight=0., q_weight=q_weight)
+    if args.residual_critic:
+        alg.update(critic_in_residual_space=True, log_actor_gradient_terms=True, bc_weight=.10)
     group_size = alg["rlt_schedule"]["train_every_transitions"]
     rng = random.Random(20261204)
     update_rng = NoiseStream(20261205)
@@ -157,11 +196,19 @@ def run(args):
                          critic_optimizer=loss.qf_optimizer.state_dict(), actor_optimizer=optimizer.state_dict(),
                          replay=replay.snapshot(), replay_success=labels, rng=rng.getstate(),
                          exploration_rng=explore.rng.get_state(), update_rng=update_rng.state, critic_only_updates=800))
+        if args.residual_critic:
+            offset = 0
+            for row in warm_log:
+                if row["index"] == 66:
+                    break
+                offset += row["chunks"]
+            scan = scan_unit_critic(policy, take_batch(replay.data["curr_obs"], [offset]))
+            write_json(args.output / "critic-scan-66.json", scan)
+            print("SCAN_66", scan["max_scan_span"], scan["random_scan"]["span"], flush=True)
         if not gates[-1]["passed"]:
             raise RuntimeError("Critic-only Q gate failed; Actor stayed frozen. See critic-gate.json.")
         policy.actor.requires_grad_(True)
-        # Match the warm Critic scale at a unit residual RMS of 0.25 rather than at the identically-zero Actor.
-        bc_weight = q_weight * gates[-1]["mean_abs_actor_q"] / (.25**2)
+        bc_weight = .10 if args.residual_critic else q_weight * gates[-1]["mean_abs_actor_q"] / (.25**2)
         loss.cfg.algorithm["bc_weight"] = bc_weight
         print("BC", bc_weight, q_weight, flush=True)
         online = []
@@ -226,7 +273,8 @@ def run(args):
                      critic_only_updates=gates[-1]["updates"], online_updates=completed,
                      total_positive_blocks=int((replay.data["rewards"][:replay.count] > 0).any(dim=-1).sum()),
                      online_positive_by_group=online_positive,
-                     config=dict(bc_weight=bc_weight, q_weight=q_weight), evaluations=checks)
+                     config=dict(bc_weight=bc_weight, q_weight=q_weight, critic_in_residual_space=args.residual_critic),
+                     evaluations=checks)
         if sum(online_positive.values()) + reward_count != final["total_positive_blocks"]:
             raise RuntimeError("Online positive count does not match the replay buffer")
         write_checkpoint(args.output / "mixed-short-actor.pt", dict(model=policy.state_dict(), model_config=cfg,
@@ -243,6 +291,7 @@ def main():
     for key in ("checkpoint", "token", "rlinf", "episodes", "baseline", "splits", "output", "gate", "snapshots", "exploration"):
         parser.add_argument(f"--{key}", type=Path, required=True)
     parser.add_argument("--success-snapshots", type=Path, required=True)
+    parser.add_argument("--residual-critic", action="store_true")
     run(parser.parse_args())
 
 

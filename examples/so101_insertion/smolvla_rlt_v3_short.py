@@ -83,7 +83,7 @@ def rollout(env, features, mapping, actor, snapshot, *, flow_seed=None, explore=
             return data, data.pop("reference_rad").cpu().numpy().astype(np.float64)
 
         obs, raw = observe()
-        unit_actions = actor.critic_in_residual_space
+        unit_actions = getattr(actor, "critic_in_residual_space", False)
         if unit_actions:
             eps_rad = (actor.actor.residual_eps_norm.reshape_as(obs["ref_chunk"]) * mapping.half).cpu().numpy()
         budget = done = False
