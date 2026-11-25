@@ -20,8 +20,8 @@ from .smolvla_rlt_td3 import load_rlinf
 
 
 HANDOFF_LIMIT = 200
-EPS_RAD = (.008, .010, .012, .016, .020, 0.)
-SIGMA = .001
+EPS_RAD = (.0045, .006, .0075, .0095, .013, 0.)
+SIGMA = .0005
 OUTCOMES = ("pickup", "arrival", "success", "slipped", "penetration_failure", "timeout")
 COUNTERS = ("steps", "start_time", "pick", "arrive", "held_ticks", "highest_lift", "seated_ticks",
             "max_streak", "max_penetration", "open_count", "was_open", "drop_ticks", "slip_count")
@@ -113,7 +113,7 @@ def resume(env, features, mapping, actor, snapshot, *, lock_claw):
     done = timeout = False
     while not (done or timeout):
         obs = features.observe(env, mapping, with_token=True, include_physical_reference=True)
-        radius_reference = obs.pop("reference_rad").cpu().numpy().astype(np.float64)
+        physical_reference = obs.pop("reference_rad").cpu().numpy().astype(np.float64)
         reference = obs["ref_chunk"]
         prediction, _, _ = actor.sac_forward({key: value.unsqueeze(0) for key, value in obs.items()},
                                               deterministic=True, apply_action_noise=False)
@@ -121,13 +121,15 @@ def resume(env, features, mapping, actor, snapshot, *, lock_claw):
         if not torch.equal(prediction, reference):
             raise RuntimeError("The zero-update Actor does not exactly match its reference")
         chunks += 1
-        clipped += int(np.count_nonzero((radius_reference[:, :5] < env.low[:5]) |
-                                         (radius_reference[:, :5] > env.high[:5])))
+        clipped += int(np.count_nonzero((physical_reference[:, :5] < env.low[:5]) |
+                                         (physical_reference[:, :5] > env.high[:5])))
         # Preserve the original physical targets exactly at zero residual, including float64 actuator clipping.
+        command_chunk = np.clip(physical_reference, env.low, env.high)
+        command_chunk += ((prediction - reference) * mapping.half).cpu().numpy()
         if lock_claw:
-            grip_change = max(grip_change, float(np.max(np.abs(radius_reference[:, -1] - GRIP))))
-            radius_reference[:, -1] = GRIP
-        for command in radius_reference:
+            grip_change = max(grip_change, float(np.max(np.abs(command_chunk[:, -1] - GRIP))))
+            command_chunk[:, -1] = GRIP
+        for command in command_chunk:
             _, done, timeout, info = env.step(command)
             if lock_claw and env.data.ctrl[-1] != GRIP:
                 raise RuntimeError("The actuator did not receive the locked gripper target")
@@ -165,7 +167,7 @@ def run(args):
     args.output.mkdir()
     features = FrozenSmolVLA(args.checkpoint)
     token_metadata = torch.load(args.token, weights_only=True, map_location="cpu")["metadata"]
-    token_source = next(args.rlinf.rglob("token_transformer.py"))
+    token_source = args.rlinf / "rlinf/models/embodiment/modules/rlt_token_transformer.py"
     features.load_token(args.token, token_source, args.checkpoint)
     env = EndToEndTelemetry(penetration_limit_mm=3.)
     try:
@@ -197,6 +199,8 @@ def run(args):
                     entry.update(row=row, file=filename.name, exact_restored_reference=True, padding_matches_ab=True)
                 report["training_snapshots"].append(entry)
             (folder / "manifest.json").write_text(json.dumps(report["training_snapshots"], indent=2) + "\n")
+        if args.export_only:
+            return
 
         with (args.output / "episodes.jsonl").open("x", buffering=1) as log:
             for old in prior:
@@ -236,7 +240,11 @@ def main():
     for name in ("checkpoint", "token", "rlinf", "episodes", "baseline", "splits", "output"):
         parser.add_argument(f"--{name}", type=Path, required=True)
     parser.add_argument("--export-train", nargs="*", type=int, default=[])
-    run(parser.parse_args())
+    parser.add_argument("--export-only", action="store_true")
+    args = parser.parse_args()
+    if args.export_only and not args.export_train:
+        parser.error("--export-only requires at least one training index")
+    run(args)
 
 
 if __name__ == "__main__":
