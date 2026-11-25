@@ -104,6 +104,15 @@ def read_snapshot(path, row):
         return row, saved["physics"], torch.from_numpy(saved["cpu_rng"]), torch.from_numpy(saved["cuda_rng"])
 
 
+def physical_commands(env, mapping, physical_reference, prediction, reference, *, lock_claw=True):
+    # Apply only the learned difference to the original radian targets, preserving exact zero-residual actions.
+    commands = np.clip(physical_reference, env.low, env.high)
+    commands += ((prediction - reference) * mapping.half).cpu().numpy()
+    if lock_claw:
+        commands[:, -1] = GRIP
+    return commands
+
+
 def resume(env, features, mapping, actor, snapshot, *, lock_claw):
     """Execute a zero-update continuation with the same five-step policy cadence."""
     row = snapshot[0]
@@ -123,12 +132,10 @@ def resume(env, features, mapping, actor, snapshot, *, lock_claw):
         chunks += 1
         clipped += int(np.count_nonzero((physical_reference[:, :5] < env.low[:5]) |
                                          (physical_reference[:, :5] > env.high[:5])))
-        # Preserve the original physical targets exactly at zero residual, including float64 actuator clipping.
-        command_chunk = np.clip(physical_reference, env.low, env.high)
-        command_chunk += ((prediction - reference) * mapping.half).cpu().numpy()
         if lock_claw:
-            grip_change = max(grip_change, float(np.max(np.abs(command_chunk[:, -1] - GRIP))))
-            command_chunk[:, -1] = GRIP
+            original_grip = np.clip(physical_reference[:, -1], env.low[-1], env.high[-1])
+            grip_change = max(grip_change, float(np.max(np.abs(original_grip - GRIP))))
+        command_chunk = physical_commands(env, mapping, physical_reference, prediction, reference, lock_claw=lock_claw)
         for command in command_chunk:
             _, done, timeout, info = env.step(command)
             if lock_claw and env.data.ctrl[-1] != GRIP:
