@@ -145,22 +145,30 @@ class FrozenSmolVLA:
         self.token = load_rlt_class(source)(**meta["model"]).cuda().eval().requires_grad_(False)
         self.token.load_state_dict(saved["state_dict"], strict=True)
 
-    @torch.inference_mode()
-    def observe(self, env, actions, *, with_token):
-        raw = env.observation()
+    def preprocess_observation(self, raw):
         proprio = torch.from_numpy(raw["observation.state"])
         batch = {key: torch.from_numpy(raw[key]).permute(2, 0, 1).float() / 255 for key in CAMERAS}
         batch.update(task=raw["task"], **{"observation.state": proprio})
-        batch = self.pre(batch)
+        return self.pre(batch)
+
+    def predict_reference(self, batch):
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            reference = self.policy.predict_action_chunk(batch)[:, :CHUNK]
+            chunk = self.policy.predict_action_chunk(batch, correct_padding_velocity=True)[:, :CHUNK]
+        return self.post(chunk.float())[0]
+
+    @torch.inference_mode()
+    def observe(self, env, actions, *, with_token, include_physical_reference=False):
+        batch = self.preprocess_observation(env.observation())
+        physical = self.predict_reference(batch)
+        obs = dict(ref_chunk=actions.normalize(physical))
+        with torch.autocast("cuda", dtype=torch.bfloat16):
             if with_token:
                 prefix, mask = extract_prefix(self.policy, batch)
-                z = self.token.encode_flat(prefix, mask)[0].float()
-        reference = actions.normalize(self.post(reference.float())[0])
-        if with_token:
-            return dict(z_rl=z, proprio=batch["observation.state"][0].float(), ref_chunk=reference)
-        return dict(ref_chunk=reference)
+                obs.update(z_rl=self.token.encode_flat(prefix, mask)[0].float(),
+                           proprio=batch["observation.state"][0].float())
+        if include_physical_reference:
+            obs["reference_rad"] = physical
+        return obs
 
 
 def rollout(env, features, mapping, start, replay=None, *, expert=False, actor=None, on_transition=None):
