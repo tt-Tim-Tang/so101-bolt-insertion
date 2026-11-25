@@ -14,12 +14,13 @@ from .smolvla_padding_e2e30 import EndToEndTelemetry
 from .smolvla_rlt_online import Replay, write_checkpoint
 from .smolvla_rlt_stage2 import CHUNK, ActionMap, FrozenSmolVLA
 from .smolvla_rlt_td3 import batch_replay, learner, load_rlinf, take_batch, train_step
-from .smolvla_rlt_v3 import SIGMA, handoff, read_cases, read_snapshot
+from .smolvla_rlt_v3 import SIGMA, read_cases, read_snapshot
 from .smolvla_rlt_v3_short import ASSESSMENT_SEEDS, NoiseStream, assessments, rollout
 
 
 ONLINE_UPDATES = 1200
 FAILURES = (60, 66)
+SUCCESSES = (20, 0)
 
 
 class Exploration:
@@ -37,42 +38,23 @@ class Exploration:
         return (ref + (eps * unit.reshape_as(ref) + noise).clamp(-eps, eps)).clamp(-1., 1.)
 
 
-def save_start(folder, index, snap, baseline):
-    row, physics, cpu, cuda = snap
-    np.savez_compressed(folder / f"{index:03d}.npz", physics=physics, cpu_rng=cpu.numpy(), cuda_rng=cuda.numpy())
-    write_json(folder / f"{index:03d}.json", dict(index=index, row=row, baseline=baseline))
-
-
-def choose_starts(args, env, features, mapping, policy, train):
-    failures, successes = [], []
-    for index in FAILURES:
-        path = args.snapshots / f"{index:03d}"
-        row = json.loads(path.with_suffix(".json").read_text())["row"]
-        if row["case"]["target"] != train[index]["target"]:
-            raise ValueError("A failure snapshot is outside the verified training split")
-        failures.append((index, read_snapshot(path.with_suffix(".npz"), row)))
-    folder = args.output / "success-starts"
-    folder.mkdir()
-    for index in (20, 0, 3, 6, 30, 33, 36, 39, 63, 69):
-        with torch.inference_mode():
-            snap, reason = handoff(env, features, train[index], 714290 + index)
-        if snap is None:
-            print("SUCCESS_SCREEN_REJECT", index, reason, flush=True)
-            continue
-        samples = assessments(env, features, mapping, policy, [(index, snap)])
-        if all(row["success"] and not row["slip"] for row in samples):
-            save_start(folder, index, snap, samples)
-            successes.append((index, snap))
-        print("SUCCESS_SCREEN", index, sum(r["success"] for r in samples), flush=True)
-        if len(successes) == 2:
-            break
-    if len(successes) != 2:
-        raise RuntimeError("Could not find two reproducibly successful training snapshots")
-    return failures, successes
+def read_starts(folder, indices, train, *, successful):
+    starts = []
+    for index in indices:
+        path = folder / f"{index:03d}"
+        saved = json.loads(path.with_suffix(".json").read_text())
+        row = saved["row"]
+        if saved["index"] != index or row["case"] != train[index]:
+            raise ValueError("A snapshot does not match its verified training case")
+        checks = saved["baseline"]
+        if len(checks) != 3 or any(r["success"] != successful or r["slip"] for r in checks):
+            raise ValueError(f"Unexpected archived screening result for {index:02d}")
+        starts.append((index, read_snapshot(path.with_suffix(".npz"), row)))
+    return starts
 
 
 @torch.no_grad()
-def q_by_outcome(policy, replay, labels):
+def q_by_outcome(policy, replay, labels, mapping):
     known = [i for i, label in enumerate(labels) if label is not None]
     batch = take_batch(replay.data, known)
     obs = batch["curr_obs"]
@@ -86,20 +68,25 @@ def q_by_outcome(policy, replay, labels):
 
     def stats(q, selected):
         values = q[selected]
-        return dict(n=len(values), mean=float(values.mean()), below_0=float((values < 0).float().mean()),
+        return dict(n=len(values), mean=float(values.mean()), p05=float(torch.quantile(values, .05)),
+                    below_0=float((values < 0).float().mean()),
                     below_minus_03=float((values < -.03).float().mean()), above_1=float((values > 1).float().mean()))
 
+    residual = (action.reshape_as(obs["ref_chunk"]) - obs["ref_chunk"])[..., :5] * mapping.half[:5]
     return dict(positive_trajectory={"replay_q": stats(data_q, mask), "actor_q": stats(actor_q, mask)},
                 negative_trajectory={"replay_q": stats(data_q, ~mask), "actor_q": stats(actor_q, ~mask)},
                 positive_reward_block_q=stats(data_q, positive), mean_abs_actor_q=float(actor_q.abs().mean()),
+                mean_actor_q=float(actor_q.mean()), mean_residual_rad=float(residual.abs().mean()),
+                max_residual_rad=float(residual.abs().max()),
                 unit_bc=float(unit.square().mean()))
 
 
 def run(args):
     exploration = json.loads(args.exploration.read_text())
     totals = {mode: sum(r["success"] for r in by_hole.values()) for mode, by_hole in exploration["outcomes"].items()}
-    mode = max(totals, key=totals.get)
-    if totals[mode] < 2 or exploration["updates"] != 0 or exploration["trials_per_cell"] != 30:
+    mode = "block"
+    if (totals[mode] < 2 or exploration["updates"] != 0 or exploration["trials_per_cell"] != 30
+            or exploration["sigmas"][mode] != .0015):
         raise ValueError("No reproducible zero-update exploration result")
     sigma = exploration["sigmas"][mode]
     explore = Exploration(mode, sigma)
@@ -117,13 +104,15 @@ def run(args):
     features = FrozenSmolVLA(args.checkpoint)
     features.load_token(args.token, args.rlinf / "rlinf/models/embodiment/modules/rlt_token_transformer.py", args.checkpoint)
     env = EndToEndTelemetry(penetration_limit_mm=3.)
+    eval_env = EndToEndTelemetry(penetration_limit_mm=3.)
     try:
         mapping = ActionMap(env, sigma=SIGMA)
         model, mixin = load_rlinf(args.rlinf)
         torch.manual_seed(actor_cfg["seed"])
         loss, optimizer = learner(model, mixin, mapping, cfg, alg, actor_cfg, "cuda")
         policy = loss.model
-        negatives, positives = choose_starts(args, env, features, mapping, policy, train)
+        negatives = read_starts(args.snapshots, FAILURES, train, successful=False)
+        positives = read_starts(args.success_snapshots, SUCCESSES, train, successful=True)
         starts = [x for pair in zip(negatives, positives, strict=True) for x in pair]
         positive_index = {i for i, _ in positives}
         warm, warm_log, labels = [], [], []
@@ -156,16 +145,18 @@ def run(args):
                 row = update_rng(train_step, loss, optimizer, actor_cfg, sample(), step, update_actor=False)
                 print(json.dumps(row), file=log)
                 if step+1 in (400, 600, 800):
-                    q = q_by_outcome(policy, replay, labels)
+                    q = q_by_outcome(policy, replay, labels, mapping)
                     pos = q["positive_trajectory"]["replay_q"]
                     neg = q["negative_trajectory"]["replay_q"]
-                    passed = (pos["mean"] > neg["mean"] and q["positive_reward_block_q"]["mean"] > neg["mean"]
-                              and pos["below_minus_03"] <= .1 and neg["below_minus_03"] <= .1)
+                    passed = neg["mean"] > -.10 and pos["mean"] - neg["mean"] > .25
                     gates.append(dict(updates=step+1, passed=passed, **q))
                     write_json(args.output / "critic-gate.json", gates)
                     print("CRITIC", gates[-1], flush=True)
-                    if passed:
-                        break
+        write_checkpoint(args.output / "critic-only.pt", dict(model=policy.state_dict(),
+                         target=loss.target_model.state_dict(), model_config=cfg, algorithm=loss.cfg.algorithm,
+                         critic_optimizer=loss.qf_optimizer.state_dict(), actor_optimizer=optimizer.state_dict(),
+                         replay=replay.snapshot(), replay_success=labels, rng=rng.getstate(),
+                         exploration_rng=explore.rng.get_state(), update_rng=update_rng.state, critic_only_updates=800))
         if not gates[-1]["passed"]:
             raise RuntimeError("Critic-only Q gate failed; Actor stayed frozen. See critic-gate.json.")
         policy.actor.requires_grad_(True)
@@ -176,15 +167,24 @@ def run(args):
         online = []
         checks = []
         completed = 0
+        online_positive = {"60": 0, "66": 0, "successes": 0}
 
         def assess(step):
             groups = {}
-            for name, subset in (("failures", negatives), ("successes", positives)):
-                rows = assessments(env, features, mapping, policy, subset)
-                groups[name] = dict(rows=rows, trials=len(rows), insertions=sum(r["success"] for r in rows),
-                                    slips=sum(r["slip"] for r in rows),
-                                    mean_residual_rad=float(np.mean([r["mean_residual_rad"] for r in rows])))
-            checks.append(dict(step=step, groups=groups, q=q_by_outcome(policy, replay, labels)))
+            queues = features.policy._queues
+            try:
+                for name, subset in (("60", negatives[:1]), ("66", negatives[1:]), ("successes", positives)):
+                    rows = assessments(eval_env, features, mapping, policy, subset)
+                    groups[name] = dict(rows=rows, trials=len(rows), insertions=sum(r["success"] for r in rows),
+                                        slips=sum(r["slip"] for r in rows),
+                                        mean_residual_rad=float(np.mean([r["mean_residual_rad"] for r in rows])))
+            finally:
+                features.policy._queues = queues
+            q = q_by_outcome(policy, replay, labels, mapping)
+            weighted_bc, weighted_q = bc_weight * q["unit_bc"], q_weight * q["mean_actor_q"]
+            checks.append(dict(step=step, groups=groups, q=q, weighted_bc=weighted_bc, weighted_q=weighted_q,
+                               weighted_bc_over_abs_q=weighted_bc/abs(weighted_q) if weighted_q else None,
+                               online_positive_by_group=online_positive.copy()))
             write_json(args.output / "evaluations.json", checks)
             print("ASSESS", step, {k: (v["insertions"], v["slips"]) for k, v in groups.items()}, flush=True)
 
@@ -195,6 +195,7 @@ def run(args):
                 nonlocal completed
                 replay.add(row)
                 labels.append(None)
+                online_positive["successes" if index in positive_index else str(index)] += int(bool(row["rewards"].any()))
                 if (replay.count-len(warm)) % group_size == 0:
                     for _ in range(group_size):
                         metric = update_rng(train_step, loss, optimizer, actor_cfg, sample(), completed)
@@ -202,6 +203,8 @@ def run(args):
                         completed += 1
                         if completed % 100 == 0:
                             print("UPDATE", completed, metric["q_data"], flush=True)
+                        if completed == ONLINE_UPDATES // 2:
+                            assess(completed)
                 return completed == ONLINE_UPDATES
 
             while completed < ONLINE_UPDATES:
@@ -212,20 +215,26 @@ def run(args):
                     labels[first:replay.count] = [row["success"]] * (replay.count-first)
                 online.append(dict(index=index, positive_start=index in positive_index, step=completed, **row))
                 print(json.dumps(online[-1]), file=episode_log)
-                if (len(checks) == 1 and completed >= ONLINE_UPDATES//2) or completed == ONLINE_UPDATES:
+                if completed == ONLINE_UPDATES:
                     assess(completed)
 
+        if [row["step"] for row in checks] != [0, 600, 1200]:
+            raise RuntimeError("Expected the exact requested evaluation checkpoints")
         final = dict(exploration=dict(mode=mode, sigma=sigma, gate_counts=totals),
                      failure_indices=list(FAILURES), success_indices=sorted(positive_index),
                      warmup=dict(blocks=len(warm), episodes=len(warm_log), positive_blocks=reward_count),
                      critic_only_updates=gates[-1]["updates"], online_updates=completed,
                      total_positive_blocks=int((replay.data["rewards"][:replay.count] > 0).any(dim=-1).sum()),
+                     online_positive_by_group=online_positive,
                      config=dict(bc_weight=bc_weight, q_weight=q_weight), evaluations=checks)
+        if sum(online_positive.values()) + reward_count != final["total_positive_blocks"]:
+            raise RuntimeError("Online positive count does not match the replay buffer")
         write_checkpoint(args.output / "mixed-short-actor.pt", dict(model=policy.state_dict(), model_config=cfg,
                                                                      update_step=completed))
         write_json(args.output / "summary.json", final)
         print("MIXED_COMPLETE", completed, final["total_positive_blocks"], flush=True)
     finally:
+        eval_env.close()
         env.close()
 
 
@@ -233,6 +242,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for key in ("checkpoint", "token", "rlinf", "episodes", "baseline", "splits", "output", "gate", "snapshots", "exploration"):
         parser.add_argument(f"--{key}", type=Path, required=True)
+    parser.add_argument("--success-snapshots", type=Path, required=True)
     run(parser.parse_args())
 
 
