@@ -65,8 +65,9 @@ def learner(model_class, loss_mixin, actions, args, alg, actor, device):
         state, commands = inputs
         return state, actions.lock(commands.reshape(-1, chunk, action_dim)).flatten(1)
 
-    for network in (policy, target):
-        network.q_head.register_forward_pre_hook(q_gripper_lock)
+    if not args.get("critic_in_residual_space", False):
+        for network in (policy, target):
+            network.q_head.register_forward_pre_hook(q_gripper_lock)
 
     class Losses(loss_mixin):
         torch_dtype = torch.float32
