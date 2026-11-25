@@ -123,9 +123,12 @@ def heldout_eval(output, env, features, mapping, policy, held, zero):
     return {k: v for k, v in result.items() if k != "rows"}
 
 
-def grouped(rng, pools, episode):
+def grouped(pools, episode, seed):
     group = GROUPS[episode % len(GROUPS)]
-    index, snap = rng.choice(pools[group])
+    candidates = pools[group]
+    cycle, offset = divmod(episode // len(GROUPS), len(candidates))
+    order = random.Random(f"{seed}:{group}:{cycle}").sample(candidates, len(candidates))
+    index, snap = order[offset]
     return group, index, snap
 
 
@@ -134,6 +137,8 @@ def load_pools(folder, train):
     rows = manifest["rows"]
     if len(rows) != 150 or [(r["index"], r["case"]) for r in rows] != list(enumerate(train)):
         raise ValueError("Snapshot manifest differs from the verified training split")
+    if manifest["valid_handoffs"] != len(train):
+        raise RuntimeError(f"Missing real 15 mm handoffs for training holes {manifest['rejected_indices']}")
     pools = {group: [] for group in GROUPS}
     for row in rows:
         if row["snapshot"] is not None:
@@ -147,13 +152,13 @@ def load_pools(folder, train):
     return manifest, pools
 
 
-def warmup(output, env, features, mapping, policy, pools, explore, rng):
+def warmup(output, env, features, mapping, policy, pools, explore):
     checkpoint = output / "warmup.pt"
     if checkpoint.is_file():
         return torch.load(checkpoint, weights_only=False, map_location="cpu")
     blocks, rows, labels = [], [], []
     while len(rows) < 200:
-        group, index, snap = grouped(rng, pools, len(rows))
+        group, index, snap = grouped(pools, len(rows), 20261206)
         offset = len(blocks)
         result = rollout(env, features, mapping, policy, snap, explore=explore if group == "base_fail" else None,
                          transition=blocks.append)
@@ -172,7 +177,7 @@ def warmup(output, env, features, mapping, policy, pools, explore, rng):
                                   positive_blocks=sum(r["positive_blocks"] for r in rows if r["group"] == g))
                           for g in GROUPS}, rows=rows)
     replay = Replay(batch_replay(blocks, "cuda"), len(blocks), "cuda")
-    saved = dict(replay=replay.snapshot(), labels=labels, rng=rng.getstate(), exploration_rng=explore.rng.get_state(),
+    saved = dict(replay=replay.snapshot(), labels=labels, exploration_rng=explore.rng.get_state(),
                  summary=result)
     write_checkpoint(checkpoint, saved)
     save_json(output / "warmup.json", result)
@@ -210,7 +215,6 @@ def run(args):
                      bc_weight=.10, q_weight=.50)
     config = gate["actor_config"] | dict(critic_in_residual_space=True, actor_noise_sigma=SIGMA_RAW)
     rng = random.Random(20261204)
-    starts_rng = random.Random(20261206)
     monitor_rng = random.Random(20261208)
     monitor = {g: monitor_rng.sample(pools[g], 10) for g in GROUPS}
     update_rng = NoiseStream(20261205)
@@ -234,11 +238,10 @@ def run(args):
                      valid_handoffs=export["valid_handoffs"], training_pool={g: len(pools[g]) for g in GROUPS})
         save_json(output / "config.json", setup)
         print("RUN_CONFIG", setup, flush=True)
-        warm = warmup(output, env, features, mapping, policy, pools, explore, starts_rng)
+        warm = warmup(output, env, features, mapping, policy, pools, explore)
         warm_n = warm["summary"]["blocks"]
         labels = warm["labels"]
         replay = Replay(warm["replay"], warm_n + ONLINE, "cuda")
-        starts_rng.setstate(warm["rng"])
         explore.rng.set_state(warm["exploration_rng"])
         del warm["replay"]
 
@@ -255,7 +258,7 @@ def run(args):
             write_checkpoint(path, dict(model=policy.state_dict(), target=loss.target_model.state_dict(),
                              critic_optimizer=loss.qf_optimizer.state_dict(), actor_optimizer=optimizer.state_dict(),
                              model_config=config, algorithm=loss.cfg.algorithm, replay=replay.snapshot(),
-                             labels=labels, rng=rng.getstate(), starts_rng=starts_rng.getstate(),
+                             labels=labels, rng=rng.getstate(),
                              exploration_rng=explore.rng.get_state(), update_rng=update_rng.state,
                              critic_only_updates=CRITIC_ONLY, online_updates=step, episode=episode, positive=positive))
 
@@ -269,7 +272,6 @@ def run(args):
             replay = Replay(saved["replay"], warm_n + ONLINE, "cuda")
             labels, step, episode, positive = (saved[k] for k in ("labels", "online_updates", "episode", "positive"))
             rng.setstate(saved["rng"])
-            starts_rng.setstate(saved["starts_rng"])
             explore.rng.set_state(saved["exploration_rng"])
             update_rng.state = saved["update_rng"]
 
@@ -378,7 +380,7 @@ def run(args):
                 return step == ONLINE
 
             while step < ONLINE:
-                group, index, snap = grouped(starts_rng, pools, episode)
+                group, index, snap = grouped(pools, episode, 20261207)
                 first = replay.count
                 episode += 1
                 row = rollout(env, features, mapping, policy, snap, explore=explore, transition=add)
