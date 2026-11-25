@@ -12,7 +12,7 @@ import yaml
 from .smolvla_motion_audit import write_json
 from .smolvla_padding_e2e30 import EndToEndTelemetry
 from .smolvla_rlt_online import Replay, write_checkpoint
-from .smolvla_rlt_stage2 import CHUNK, ActionMap, FrozenSmolVLA
+from .smolvla_rlt_stage2 import CHUNK, GRIP, ActionMap, FrozenSmolVLA
 from .smolvla_rlt_td3 import batch_replay, learner, load_rlinf, take_batch, train_step
 from .smolvla_rlt_v3 import HANDOFF_LIMIT, SIGMA, handoff, physical_commands, read_cases, read_snapshot, restore_handoff
 
@@ -83,6 +83,9 @@ def rollout(env, features, mapping, actor, snapshot, *, flow_seed=None, explore=
             return data, data.pop("reference_rad").cpu().numpy().astype(np.float64)
 
         obs, raw = observe()
+        unit_actions = actor.critic_in_residual_space
+        if unit_actions:
+            eps_rad = (actor.actor.residual_eps_norm.reshape_as(obs["ref_chunk"]) * mapping.half).cpu().numpy()
         budget = done = False
         residuals = []
         while not done and not budget:
@@ -90,8 +93,15 @@ def rollout(env, features, mapping, actor, snapshot, *, flow_seed=None, explore=
                 ref = obs["ref_chunk"]
                 action = (explore(actor_command, actor, obs, noisy=True) if explore is not None
                           else actor_command(actor, obs))
-                residuals.append(float(((action - ref).abs()[..., :5] * mapping.half[:5]).mean()))
-                commands = physical_commands(env, mapping, raw, action, ref)
+                if unit_actions:
+                    anchor = np.clip(raw, env.low, env.high)
+                    delta = action.cpu().numpy() * eps_rad
+                    residuals.append(float(np.abs(delta[:, :5]).mean()))
+                    commands = anchor + delta
+                    commands[:, -1] = GRIP
+                else:
+                    residuals.append(float(((action - ref).abs()[..., :5] * mapping.half[:5]).mean()))
+                    commands = physical_commands(env, mapping, raw, action, ref)
             rewards = np.zeros(CHUNK, dtype=np.float32)
             executed = []
             for i, command in enumerate(commands):
@@ -102,8 +112,16 @@ def rollout(env, features, mapping, actor, snapshot, *, flow_seed=None, explore=
                     break
             next_obs, next_raw = (obs, raw) if done else observe()
             if transition is not None:
-                commands = executed + [executed[-1]] * (CHUNK - len(executed))
-                measured = mapping.normalize(torch.as_tensor(np.array(commands), device=ref.device))
+                if unit_actions:
+                    count = len(executed)
+                    units = np.zeros((CHUNK, ref.shape[-1]), dtype=np.float32)
+                    units[:count, :5] = np.clip((np.array(executed)[:, :5] - anchor[:count, :5]) / eps_rad[:count, :5], -1, 1)
+                    # Repeat the last realized residual in unused terminal positions.
+                    units[count:] = units[count-1]
+                    measured = torch.as_tensor(units, device=ref.device)
+                else:
+                    commands = executed + [executed[-1]] * (CHUNK - len(executed))
+                    measured = mapping.normalize(torch.as_tensor(np.array(commands), device=ref.device))
                 budget = bool(transition(dict(curr_obs=obs, next_obs=next_obs, actions=measured, rewards=rewards,
                                               dones=done, terminations=done, intervene_flags=np.zeros(CHUNK, bool))))
             obs, raw = next_obs, next_raw
