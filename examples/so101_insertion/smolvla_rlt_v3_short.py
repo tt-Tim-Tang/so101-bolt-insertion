@@ -197,6 +197,12 @@ def run(args):
         print("SCALE", {k: v for k, v in scale.items() if k != "samples_mm"}, flush=True)
 
         starts = select_starts(env, features, mapping, policy, train, args.output)
+        scales = [dict(training_index=audit["index"], **scale)]
+        scales.extend(dict(training_index=index, **scale_probe(env, features, mapping, policy, snapshot))
+                      for index, snapshot in starts if index != audit["index"])
+        draws = [value for probe in scales for value in probe["samples_mm"]]
+        write_json(args.output / "noise-scale.json", dict(sigma=SIGMA, probes=scales, draws=len(draws),
+                   median_mm=float(np.median(draws)), p95_mm=float(np.quantile(draws, .95))))
         warm = []
         warm_log = []
         rollout_rng = NoiseStream(20261129)
