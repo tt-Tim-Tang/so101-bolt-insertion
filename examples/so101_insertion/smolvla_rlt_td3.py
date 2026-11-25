@@ -90,7 +90,7 @@ def take_batch(value, indices):
     return value[indices]
 
 
-def train_step(loss, actor_optim, actor, batch, step):
+def train_step(loss, actor_optim, actor, batch, step, *, update_actor=True):
     policy, target, alg = loss.model, loss.target_model, loss.cfg.algorithm
     q_optim = loss.qf_optimizer
     loss.update_step = step
@@ -101,7 +101,7 @@ def train_step(loss, actor_optim, actor, batch, step):
                                            error_if_nonfinite=True)
     q_optim.step()
     row = dict(step=step + 1, critic_loss=q_loss.item(), q_grad=q_grad.item(), **q_stats)
-    if step % alg["critic_actor_ratio"] == 0:
+    if update_actor and step % alg["critic_actor_ratio"] == 0:
         actor_optim.zero_grad(set_to_none=True)
         objective, _, stats = loss.forward_actor(batch)
         objective.backward()
