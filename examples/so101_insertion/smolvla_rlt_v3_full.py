@@ -19,7 +19,7 @@ from .smolvla_rlt_stage2 import ActionMap, FrozenSmolVLA
 from .smolvla_rlt_td3 import batch_replay, learner, load_rlinf, take_batch, train_step
 from .smolvla_rlt_v3 import SIGMA, episode_result, handoff, read_snapshot
 from .smolvla_rlt_v3_mixed import Exploration, q_by_outcome, scan_unit_critic
-from .smolvla_rlt_v3_pool import VALIDATION_SEED, EpisodeTelemetry, fixed_cases, save_json
+from .smolvla_rlt_v3_pool import VALIDATION_SEED, EpisodeTelemetry, finish_reference, fixed_cases, save_json
 from .smolvla_rlt_v3_short import NoiseStream, rollout
 
 SIGMA_RAW = .0015
@@ -58,8 +58,8 @@ def end_to_end(env, features, mapping, policy, case, seed, video=None):
             if snap is not None:
                 continuation = rollout(env, features, mapping, policy, snap, live_handoff=True,
                                        frame=frame if video else None)
-            elif video:
-                frame(env.observation())
+            else:
+                finish_reference(env, features, frame=frame if video else None)
         _, stopped, timeout, info = env.last_step
         outcome = episode_result(info, timeout, stopped)
         if continuation is not None and continuation["slip"]:
@@ -358,6 +358,8 @@ def run(args):
                 nonlocal step
                 replay.add(row)
                 labels.append(None)
+                if row["dones"]:
+                    labels[first:replay.count] = [bool(row["rewards"].any())] * (replay.count - first)
                 positive[group] += int(bool(row["rewards"].any()))
                 if (replay.count - warm_n) % group_size == 0:
                     for _ in range(group_size):
@@ -380,10 +382,11 @@ def run(args):
                 first = replay.count
                 episode += 1
                 row = rollout(env, features, mapping, policy, snap, explore=explore, transition=add)
-                if not row["budget_truncated"]:
-                    labels[first:replay.count] = [row["success"]] * (replay.count - first)
                 log_row(episode_log, dict(episode=episode, group=group, index=index, online_update=step, **row))
-        best = max(checks, key=validation_rank)["step"]
+        best_check = max(checks, key=validation_rank)
+        best = best_check["step"]
+        save_json(output / "best.json", dict(step=best, checkpoint=f"online-{best:05d}.pt",
+                                            validation=best_check["validation"]))
         tests = {}
         for weight_step in sorted({best, ONLINE}):
             state = torch.load(output / f"online-{weight_step:05d}.pt", weights_only=False, map_location="cpu")

@@ -42,15 +42,19 @@ def fixed_cases(args):
 
 
 @torch.inference_mode()
-def finish_reference(env, features):
+def finish_reference(env, features, *, frame=None):
     while not any(env.last_step[1:3]):
         raw = env.observation()
         commands = features.predict_reference(features.preprocess_observation(raw)).cpu().numpy()
         for command in commands:
+            if frame is not None:
+                frame(raw)
             _, done, timeout, _ = env.step(command)
             if done or timeout:
                 break
-            env.observation()
+            raw = env.observation()
+    if frame is not None:
+        frame(env.observation())
     _, done, timeout, info = env.last_step
     return dict(episode_result(info, timeout, done), steps=env.steps, stable_s=info["stable_s"])
 
