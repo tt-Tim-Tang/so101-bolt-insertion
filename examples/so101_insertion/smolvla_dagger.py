@@ -9,7 +9,7 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
-from examples.so101_insertion.scene import IMAGE_SIZE, MOUTH_Z, TASK
+from examples.so101_insertion.scene import IMAGE_SIZE, SHAFT_RADIUS, TASK
 from examples.so101_insertion.smolvla25_data import CAMERAS, FPS, MERGED_REPO_ID, create_dataset, make_case
 from examples.so101_insertion.smolvla_padding_e2e30 import EndToEndTelemetry, failure_mode, replay
 from examples.so101_insertion.smolvla_rlt_stage2 import GRIP, STATE, FrozenSmolVLA
@@ -68,7 +68,7 @@ def smoothstep(value):
     return x*x*(3.-2.*x)
 
 
-def teach(env,case,saved,*,record,unload_mm=1.2,align_ticks=26,descent_mm=.55):
+def teach(env,case,saved,*,record,unload_mm=1.2,align_ticks=26,descent_mm=.55,stall_feedback=False):
     if not saved:
         return dict(success=False,slipped=0,reason="no_eligible_takeover",frames=0), []
     env.restore(case,saved)
@@ -79,12 +79,19 @@ def teach(env,case,saved,*,record,unload_mm=1.2,align_ticks=26,descent_mm=.55):
     command[-1] = GRIP
     center = env.model.body(env.target_id).pos[:2].copy()
     up = np.array([0.,0.,1.])
+    stall = saved["reason"]=="stall"
+    feedback = stall and stall_feedback
+    if stall_feedback and not stall:
+        align_ticks,descent_mm = 26,.55
     # Align at the approach height or unload slightly from the captured stall.
-    top = start_tip[2]+(.001*unload_mm if saved["reason"]=="stall" else 0.)
+    top = start_tip[2]+(.001*unload_mm if stall else 0.)
     bottom = env.floor_z+.0006
     descent_ticks = int(np.ceil(1.5*max(0.,top-bottom)/(.001*descent_mm)))
     xy_bias = np.zeros(2)
+    z_bias = 0.
     limit = np.array([.010,.012,.012,.014,.019])
+    if feedback:
+        limit *= .44
     difference = np.zeros(5)
     frames, info = [], {}
     first_jump = arm_jump = peak_jump = rise_mm = 0.
@@ -99,6 +106,12 @@ def teach(env,case,saved,*,record,unload_mm=1.2,align_ticks=26,descent_mm=.55):
             wanted_z = (1-end)*((1-alpha)*start_tip[2]+alpha*top)+end*bottom
             wanted_axis = (1-alpha)*start_axis+alpha*up
             wanted_axis /= np.linalg.norm(wanted_axis)
+            if feedback:
+                if i<=align_ticks and tip[2]-start_tip[2]>.001:
+                    wanted_z = min(wanted_z,start_tip[2]+.00045)
+                if i>align_ticks:
+                    z_bias = np.clip(z_bias+np.clip(.12*(wanted_z-tip[2]),-.00008,.00006),-.0019,.0002)
+                    wanted_z += z_bias
             goal = np.r_[wanted_xy+xy_bias,wanted_z]
             qpos = env.data.qpos[env.joints].copy()
             try:
@@ -134,7 +147,7 @@ def teach(env,case,saved,*,record,unload_mm=1.2,align_ticks=26,descent_mm=.55):
         peak_jump = max(peak_jump,float(step_jump.max()))
         if i==0:
             first_jump,arm_jump = float(step_jump.max()),float(step_jump[:5].max())
-        if i<=align_ticks and saved["reason"]=="stall":
+        if i<=align_ticks and stall:
             rise_mm = max(rise_mm,1000*float(env.data.body(env.bolt_id).xpos[2]-start_tip[2]))
         if done or timeout or info["slipped"]:
             break
@@ -142,10 +155,16 @@ def teach(env,case,saved,*,record,unload_mm=1.2,align_ticks=26,descent_mm=.55):
                    and not info["penetration_failure"] and rise_mm<=1.5)
     reason = "success" if success else "unload_overrun" if rise_mm>1.5 else "slip" if env.slip_count else (
         "penetration" if info.get("penetration_failure") else "deep_jam" if env.max_near_depth_mm>=15 else "rim_jam")
+    tip,axis,xy,depth,tilt = env.bolt_pose()
+    mouth_xy = xy+depth*axis[:2]/max(axis[2],.01)
+    gap = tip[2]-env.floor_z-SHAFT_RADIUS*np.linalg.norm(axis[:2])
     result = dict(success=success,reason=reason,slipped=int(env.slip_count),opened_early=int(env.open_count),
                   frames=env.steps-saved["step"],first_jump_mrad=first_jump,first_arm_jump_mrad=arm_jump,
                   peak_jump_mrad=peak_jump,unload_rise_mm=rise_mm,ik_failures=ik_failures,
-                  max_penetration_mm=float(env.max_penetration)*1000,max_depth_mm=env.max_near_depth_mm)
+                  max_penetration_mm=float(env.max_penetration)*1000,max_depth_mm=env.max_near_depth_mm,
+                  final_depth_mm=depth*1000,final_xy_mm=float(np.linalg.norm(xy)*1000),final_tilt_deg=tilt,
+                  final_gap_mm=float(gap*1000),final_mouth_xy_mm=float(np.linalg.norm(mouth_xy)*1000),
+                  seated_ms=env.max_streak*env.model.opt.timestep*1000)
     return result,frames
 
 
@@ -197,7 +216,8 @@ def screen(args, features, env):
                 np.save(path.with_suffix(".npy"),physics)
             else:
                 result, frames = teach(env,row["case"],saved|dict(physics=physics),record=True,
-                                       unload_mm=args.unload_mm,align_ticks=args.align_ticks,descent_mm=args.descent_mm)
+                                       unload_mm=args.unload_mm,align_ticks=args.align_ticks,descent_mm=args.descent_mm,
+                                       stall_feedback=args.stall_feedback)
                 row["teacher"] = result
                 if result["success"]:
                     save_frames(path.with_suffix(".npz"),frames)
@@ -217,7 +237,7 @@ def dry_run(args,env):
         if saved:
             saved = saved | dict(physics=np.load(path.with_suffix(".npy")))
         result,_ = teach(env,row["case"],saved,record=False,unload_mm=args.unload_mm,
-                         align_ticks=args.align_ticks,descent_mm=args.descent_mm)
+                         align_ticks=args.align_ticks,descent_mm=args.descent_mm,stall_feedback=args.stall_feedback)
         if saved is None:
             result["slipped"] = row["base"]["slipped"]
         save_json(folder/path.name,row|dict(teacher=result))
@@ -234,7 +254,8 @@ def report_gate(args):
                   first_max_jump_mrad=max(r.get("first_jump_mrad",0.) for r in saved),
                   first_max_arm_jump_mrad=max(r.get("first_arm_jump_mrad",0.) for r in saved),
                   reasons=dict(Counter(r["reason"] for r in saved)),teacher_parameters=dict(
-                      unload_mm=args.unload_mm,align_ticks=args.align_ticks,descent_mm=args.descent_mm),
+                      unload_mm=args.unload_mm,align_ticks=args.align_ticks,descent_mm=args.descent_mm,
+                      stall_feedback=args.stall_feedback),
                   rows=rows)
     save_json(args.output/f"{args.gate_dir}.json",result)
     print("TEACH_GATE_SUMMARY",{k:v for k,v in result.items() if k!="rows"},flush=True)
@@ -335,6 +356,7 @@ def main():
     parser.add_argument("--unload-mm",type=float,default=1.2)
     parser.add_argument("--align-ticks",type=int,default=26)
     parser.add_argument("--descent-mm",type=float,default=.55)
+    parser.add_argument("--stall-feedback",action="store_true")
     parser.add_argument("--start",type=int,default=0)
     parser.add_argument("--stop",type=int)
     parser.add_argument("--shard",type=int,default=0)
