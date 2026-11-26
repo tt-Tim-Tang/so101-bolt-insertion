@@ -93,7 +93,7 @@ def teach(env,case,saved,*,record,unload_mm=1.2,align_ticks=26,descent_mm=.55):
         if i:
             alpha = float(smoothstep(i/align_ticks))
             end = float(smoothstep((i-align_ticks)/max(1,descent_ticks)))
-            tip, axis, xy, _, _ = env.bolt_pose()
+            tip, axis, _, _, _ = env.bolt_pose()
             wanted_xy = (1-alpha)*start_tip[:2]+alpha*center
             xy_bias = np.clip(xy_bias+np.clip(.13*(wanted_xy-tip[:2]),-.00008,.00008),-.0014,.0014)
             wanted_z = (1-end)*((1-alpha)*start_tip[2]+alpha*top)+end*bottom
@@ -218,6 +218,8 @@ def dry_run(args,env):
             saved |= dict(physics=np.load(path.with_suffix(".npy")))
         result,_ = teach(env,row["case"],saved,record=False,unload_mm=args.unload_mm,
                          align_ticks=args.align_ticks,descent_mm=args.descent_mm)
+        if saved is None:
+            result["slipped"] = row["base"]["slipped"]
         save_json(folder/path.name,row|dict(teacher=result))
         print("TEACH_GATE",row["index"],row["base"]["reason"],result,flush=True)
 
@@ -351,7 +353,8 @@ def main():
         if args.phase=="plan":
             candidate_plan(args,held,train,val)
             return
-        env = ScreenInsertion(penetration_limit_mm=LIMIT_MM)
+        env_class = EndToEndTelemetry if args.phase=="eval" else ScreenInsertion
+        env = env_class(penetration_limit_mm=LIMIT_MM)
         try:
             if args.phase=="gate":
                 dry_run(args,env)
