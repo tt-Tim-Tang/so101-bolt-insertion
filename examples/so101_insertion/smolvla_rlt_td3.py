@@ -42,7 +42,7 @@ def batch_replay(replay, device):
     return {
         **{
             field: {key: torch.stack([row[field][key] for row in replay])
-                    for key in ("z_rl", "proprio", "ref_chunk")}
+                    for key in replay[0][field]}
             for field in ("curr_obs", "next_obs")
         },
         **{key: torch.as_tensor(np.array([row[key] for row in replay]), device=device)
