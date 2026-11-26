@@ -9,12 +9,12 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
-from .scene import IMAGE_SIZE, MOUTH_Z, TASK
-from .smolvla25_data import CAMERAS, FPS, MERGED_REPO_ID, create_dataset, make_case
-from .smolvla_padding_e2e30 import EndToEndTelemetry, failure_mode, replay
-from .smolvla_rlt_stage2 import GRIP, STATE, FrozenSmolVLA
-from .smolvla_rlt_v3 import COUNTERS
-from .smolvla_rlt_v3_pool import fixed_cases, save_json
+from examples.so101_insertion.scene import IMAGE_SIZE, MOUTH_Z, TASK
+from examples.so101_insertion.smolvla25_data import CAMERAS, FPS, MERGED_REPO_ID, create_dataset, make_case
+from examples.so101_insertion.smolvla_padding_e2e30 import EndToEndTelemetry, failure_mode, replay
+from examples.so101_insertion.smolvla_rlt_stage2 import GRIP, STATE, FrozenSmolVLA
+from examples.so101_insertion.smolvla_rlt_v3 import COUNTERS
+from examples.so101_insertion.smolvla_rlt_v3_pool import fixed_cases, save_json
 
 
 DAGGER_ID = "local/so101_smolvla25_dagger"
