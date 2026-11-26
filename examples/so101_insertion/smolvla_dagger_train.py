@@ -128,6 +128,7 @@ def run(args):
             row = dict(update=updates,total_step=START+updates,train_loss=float(np.mean(micro_losses)),
                        lr=lr_used,next_lr=a[3].param_groups[0]["lr"],seconds=now-prev,
                        original_samples=observed-new_count,dagger_samples=new_count)
+            args.output.mkdir(parents=True,exist_ok=True)
             with (args.output/"train-metrics.jsonl").open("a",encoding="utf-8") as log:
                 print(json.dumps(row),file=log)
             if updates<=10:
