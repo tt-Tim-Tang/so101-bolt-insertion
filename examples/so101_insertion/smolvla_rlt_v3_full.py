@@ -84,7 +84,7 @@ def end_to_end(env, features, mapping, policy, case, seed, video=None):
             writer.release()
 
 
-def heldout_eval(output, env, features, mapping, policy, held, zero):
+def heldout_eval(output, env, features, mapping, policy, held, zero, *, replay_episode=end_to_end):
     output.mkdir(exist_ok=True)
     videos = output / "failures"
     videos.mkdir(exist_ok=True)
@@ -98,7 +98,7 @@ def heldout_eval(output, env, features, mapping, policy, held, zero):
             case = dict(target=[old["target_x_mm"], old["target_y_mm"]], source=[0, 0],
                         joints=[0] * 5, noise=old["seed"])
             scratch = output / "active.mp4"
-            row = dict(index=i, **end_to_end(env, features, mapping, policy, case, old["seed"], scratch))
+            row = dict(index=i, **replay_episode(env, features, mapping, policy, case, old["seed"], scratch))
             row.update(zero_success=bool(zero[i]["success"]), zero_slipped=zero[i]["slipped"],
                        zero_timeout=zero[i]["timeout"], rescued=bool(row["success"] and not zero[i]["success"]),
                        lost=bool(zero[i]["success"] and not row["success"]), video=None)
