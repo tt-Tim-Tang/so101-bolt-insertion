@@ -31,9 +31,10 @@ def load_route(root):
 
 
 class StallGate:
-    def __init__(self):
+    def __init__(self, window_blocks=3):
         self.depths = []
         self.active = False
+        self.window_blocks = window_blocks
 
     def request(self, env):
         if env.first_contact is None or not env.pickup_state()[-1]:
@@ -44,8 +45,8 @@ class StallGate:
             return True
         if env.seated_ticks:
             return False
-        if len(self.depths) >= 3:
-            progress = self.depths[-1] - self.depths[-3]
+        if len(self.depths) >= self.window_blocks:
+            progress = self.depths[-1] - self.depths[-self.window_blocks]
             misaligned = np.linalg.norm(xy) > .0012 or tilt > 5.
             self.active = progress < .6 or (misaligned and progress < 1.3)
         return self.active
