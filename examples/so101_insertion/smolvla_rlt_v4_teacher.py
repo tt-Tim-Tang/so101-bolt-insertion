@@ -67,6 +67,9 @@ class ScriptTeacher:
     def predict_action_batch(self, *, env_obs, mode, compute_values):
         return self.chunk(env_obs["reference"])[None], {}
 
+    def limit(self, reference, residual):
+        return np.clip(residual, -1, 1)
+
     def score(self, reference, residual, *, unload):
         env, shadow = self.env, self.shadow
         mujoco.mj_copyData(shadow, env.model, env.data)
@@ -137,14 +140,15 @@ class ScriptTeacher:
                                .045*np.cross(axis, (0., 0., 1.))]
                 desired = q + inverse@target
                 requested.append((desired-reference[:, :5])/self.bounds)
-                candidates.append(requested[-1].clip(-1, 1))
+                candidates.append(self.limit(reference, requested[-1]))
         scored = [(self.score(reference, u, unload=unload), u) for u in candidates]
         best_score, best = min(scored, key=lambda entry: entry[0])
         for axis_index in range(5):
             axis_best = best
             for delta in (-.6, .6):
                 candidate = axis_best.copy()
-                candidate[:, axis_index] = np.clip(candidate[:, axis_index]+delta, -1, 1)
+                candidate[:, axis_index] += delta
+                candidate = self.limit(reference, candidate)
                 score = self.score(reference, candidate, unload=unload)
                 if score < best_score:
                     best_score, best = score, candidate
