@@ -39,13 +39,14 @@ def mixed_loader(loader,boundary,seed):
         raise ValueError("Unexpected DAgger frame count")
     weights = torch.full((len(dataset),), .20/new_frames, dtype=torch.double)
     weights[:orig_frames] = .80/orig_frames
-    sampler = WeightedRandomSampler(weights,len(dataset),replacement=True,
+    samples_per_epoch = len(dataset)//EFFECTIVE_BATCH*EFFECTIVE_BATCH
+    sampler = WeightedRandomSampler(weights,samples_per_epoch,replacement=True,
                                     generator=torch.Generator().manual_seed(seed))
     print("DAGGER_SAMPLER",dict(original_frame_weight=.80/orig_frames,dagger_frame_weight=.20/new_frames,
                                 original_frames=orig_frames,dagger_frames=new_frames,
                                 dagger_probability=float(weights[orig_frames:].sum())),flush=True)
     return DataLoader(dataset,batch_size=loader.batch_size,sampler=sampler,num_workers=loader.num_workers,
-                      pin_memory=loader.pin_memory,drop_last=loader.drop_last,collate_fn=loader.collate_fn,
+                      pin_memory=loader.pin_memory,drop_last=True,collate_fn=loader.collate_fn,
                       prefetch_factor=loader.prefetch_factor,persistent_workers=loader.persistent_workers,
                       multiprocessing_context=loader.multiprocessing_context,worker_init_fn=loader.worker_init_fn)
 
