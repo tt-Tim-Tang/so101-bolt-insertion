@@ -215,7 +215,7 @@ def dry_run(args,env):
         row = json.loads(path.read_text())
         saved = row.get("takeover")
         if saved:
-            saved |= dict(physics=np.load(path.with_suffix(".npy")))
+            saved = saved | dict(physics=np.load(path.with_suffix(".npy")))
         result,_ = teach(env,row["case"],saved,record=False,unload_mm=args.unload_mm,
                          align_ticks=args.align_ticks,descent_mm=args.descent_mm)
         if saved is None:
