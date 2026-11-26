@@ -38,11 +38,11 @@ class StallGate:
     def request(self, env):
         if env.first_contact is None or not env.pickup_state()[-1]:
             return False
-        tip, _, xy, depth, tilt = env.bolt_pose()
+        _, _, xy, depth, tilt = env.bolt_pose()
         self.depths.append(depth * 1000)
         if self.active:
             return True
-        if env.seated_ticks or env.max_streak:
+        if env.seated_ticks:
             return False
         if len(self.depths) >= 3:
             progress = self.depths[-1] - self.depths[-3]
