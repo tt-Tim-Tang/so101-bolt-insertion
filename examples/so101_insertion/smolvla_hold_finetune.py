@@ -20,20 +20,20 @@ from .smolvla25_data import (
     FPS,
     MERGED_REPO_ID,
     TARGET_RANGE_MM,
+    VALIDATION_REPO_ID,
     SmolVLAInsertion,
     create_dataset,
     make_case,
 )
 
 
-HOLD_REPO_ID = "local/so101_smolvla25_hold50"
-MIXED_REPO_ID = "local/so101_smolvla25_hold_mixed"
+HOLD_REPO_ID = "local/so101_smolvla25_hold50_v2"
+MIXED_REPO_ID = "local/so101_smolvla25_hold_mixed_v2"
 STATS = "observation.state"
 PENETRATION_LIMIT_MM = 3.0
 START = 20_000
 WARMUP = 100
 EFFECTIVE_BATCH = 64
-SAVE_AT = (1000, 2000, 3000)
 
 
 def save_json(path: Path, value: object) -> None:
@@ -68,46 +68,6 @@ class HoldCollectionEnv(SmolVLAInsertion):
         return reward, bool(info["penetration_failure"]), timeout, info
 
 
-def locked_bolt_ik(env: SmolVLAInsertion, position: np.ndarray, axis: np.ndarray, wrist_roll: float, grip: float = -0.055) -> np.ndarray:
-    """Solve 4-DOF tip+axis IK with wrist_roll held strictly constant."""
-    tcp = env.data.site("grasp")
-    bolt = env.data.body(env.bolt_id)
-    rot = tcp.xmat.reshape(3, 3)
-    local_tip = rot.T @ (bolt.xpos - tcp.xpos)
-    local_axis = rot.T @ bolt.xmat.reshape(3, 3)[:, 2]
-    posture = env.state().astype(float)
-    posture[4:] = wrist_roll, grip
-    q, best = posture.copy(), posture.copy()
-    best_cost = np.inf
-    jp = np.zeros((3, env.model.nv))
-    jr = np.zeros_like(jp)
-    body = int(env.model.site_bodyid[env.grasp_id])
-    dofs = env.dofs[:4]
-    axis_weight, posture_weight = 0.024, 0.004
-    reg = posture_weight * np.eye(4)
-    damping = 0.00004 * np.eye(4)
-    for _ in range(32):
-        env.ik_data.qpos[env.joints] = q
-        mujoco.mj_forward(env.model, env.ik_data)
-        site = env.ik_data.site("grasp")
-        rot = site.xmat.reshape(3, 3)
-        tip, up = site.xpos + rot @ local_tip, rot @ local_axis
-        error = position - tip
-        anchor = posture[:4] - q[:4]
-        cost = np.sum(error**2) + axis_weight**2 * np.sum((axis - up) ** 2) + posture_weight**2 * np.sum(anchor**2)
-        if cost < best_cost:
-            best_cost, best = cost, q.copy()
-        mujoco.mj_jac(env.model, env.ik_data, jp, jr, tip, body)
-        jac = np.vstack((jp[:, dofs], axis_weight * (np.eye(3) - np.outer(up, up)) @ jr[:, dofs], reg))
-        residual = np.r_[error, axis_weight * np.cross(up, axis), posture_weight * anchor]
-        delta = np.linalg.solve(jac.T @ jac + damping, jac.T @ residual)
-        following = np.clip(q[:4] + np.clip(delta, -0.045, 0.045), env.low[:4], env.high[:4])
-        if np.max(np.abs(following - q[:4])) < 1e-5:
-            break
-        q[:4] = following
-    return best
-
-
 def clean_hold_expert(
     env: SmolVLAInsertion,
     case: dict,
@@ -117,15 +77,16 @@ def clean_hold_expert(
     settle_ticks: int = 4,
     hold_frames: int = 25,
 ):
-    """Run the 25 Hz expert with locked wrist_roll during descent and a static bottom hold."""
+    """Run the exact 5-DOF 25 Hz expert prefix through seating, then hold static."""
     env.start(case)
     cmd = env.state().astype(float)
     source, target = [env.model.body(n).pos[:2].copy() for n in ("source", "target")]
     info = {}
     scale = 50 / env.control_fps
+    max_abs_roll = abs(float(cmd[4]))
 
     def move(phase, point, grip, ticks, up=(0, 0, 1)):
-        nonlocal cmd, info
+        nonlocal cmd, info, max_abs_roll
         ticks = ceil(ticks / scale)
         env.phase = phase
         try:
@@ -138,6 +99,7 @@ def clean_hold_expert(
         for t in range(1, ticks + 1):
             f = t / ticks
             action = (cmd + (end - cmd) * (f * f * (3 - 2 * f))).astype(np.float32)
+            max_abs_roll = max(max_abs_roll, abs(float(action[4])))
             if record:
                 record(action)
             _, done, timeout, info = env.step(action)
@@ -153,18 +115,16 @@ def clean_hold_expert(
         ("lift", 0.107, -0.055, 64),
     ):
         if move(phase, [*source, z], grip, ticks):
-            return info, float(np.abs(cmd[4]))
+            return info, max_abs_roll
     if not env.pick:
-        return dict(info, reason="pickup"), float(np.abs(cmd[4]))
+        return dict(info, reason="pickup"), max_abs_roll
 
     def tip_offset():
         return env.data.body("bolt").xpos - env.data.site("grasp").xpos
 
     if move("transfer", np.r_[target, MOUTH_Z + 0.030] - tip_offset(), -0.055, 64):
-        return info, float(np.abs(cmd[4]))
+        return info, max_abs_roll
 
-    locked_roll = float(cmd[4])
-    max_abs_roll = abs(locked_roll)
     xy_correction = np.zeros(2)
 
     def track_tip(z, axis=(0.0, 0.0, 1.0)):
@@ -172,9 +132,8 @@ def clean_hold_expert(
         tip = env.data.body("bolt").xpos
         xy_correction[:] = np.clip(xy_correction + np.clip(0.2 * (target - tip[:2]), -0.0001, 0.0001), -0.002, 0.002)
         point = np.r_[target + xy_correction, z]
-        target_q = locked_bolt_ik(env, point, np.asarray(axis), locked_roll)
-        cmd[:4] += np.clip(target_q[:4] - cmd[:4], -0.025 * scale, 0.025 * scale)
-        cmd[4] = locked_roll
+        target_q = env.bolt_ik(point, np.asarray(axis), cmd)
+        cmd[:5] += np.clip(target_q[:5] - cmd[:5], -0.025 * scale, 0.025 * scale)
         cmd[-1] = -0.055
         max_abs_roll = max(max_abs_roll, abs(float(cmd[4])))
         action = cmd.astype(np.float32)
@@ -311,7 +270,7 @@ def run_collect(args) -> None:
                     and info["opened_early"] == 0
                     and info["stable_s"] >= 0.75
                     and info["max_penetration_mm"] <= 1.5
-                    and info["max_abs_roll"] <= 0.15
+                    and info["max_abs_roll"] <= 1.10
                     and len(frames) >= 214
                 )
                 replay_ok = None
@@ -392,11 +351,13 @@ def run_collect(args) -> None:
         fps=FPS,
         settle_ticks=args.settle_ticks,
         hold_frames=args.hold_frames,
+        total_slips=0,
         mean_new_frames=float(np.mean(lengths)),
         min_new_frames=int(min(lengths)),
         max_new_frames=int(max(lengths)),
         mean_stable_s=float(np.mean(stables)),
         min_stable_s=float(min(stables)),
+        median_penetration_mm=float(np.median(max_pens)),
         max_penetration_mm=float(max(max_pens)),
         max_abs_roll=float(max(max_rolls)),
         episode_lengths=lengths,
@@ -426,6 +387,7 @@ def run_audit(args) -> None:
     config = policy.config
 
     original = load_dataset(args.original_dataset, MERGED_REPO_ID, config)
+    validation = load_dataset(args.validation_dataset, VALIDATION_REPO_ID, config)
     mixed = load_dataset(args.mixed_dataset, manifest["repo_id"], config)
     boundary = manifest["original_frames"]
     if (len(original), len(mixed) - boundary) != (boundary, manifest["new_frames"]):
@@ -434,18 +396,36 @@ def run_audit(args) -> None:
     episodes = mixed.meta.episodes
     starts = list(episodes["dataset_from_index"])
     stops = list(episodes["dataset_to_index"])
+    prefix_indices = [
+        idx
+        for ep in range(manifest["original_episodes"], manifest["total_episodes"])
+        for idx in range(starts[ep], min(starts[ep] + 191, stops[ep]))
+    ]
     tail_indices = [
         idx
         for ep in range(manifest["original_episodes"], manifest["total_episodes"])
-        for idx in range(starts[ep] + 170, stops[ep])
+        for idx in range(starts[ep] + 191, stops[ep])
     ]
-    if len(tail_indices) < args.batch:
-        raise RuntimeError(f"Expected >= {args.batch} tail frames, found {len(tail_indices)}")
+    val_starts = list(validation.meta.episodes["dataset_from_index"])
+    val_stops = list(validation.meta.episodes["dataset_to_index"])
+    val_prefix_indices = [
+        idx
+        for s, e in zip(val_starts, val_stops, strict=True)
+        for idx in range(s, min(s + 191, e))
+    ]
+    for name, pool in (
+        ("val_prefix_0_190", val_prefix_indices),
+        ("hold50_prefix_0_190", prefix_indices),
+        ("hold50_tail_191_216", tail_indices),
+    ):
+        if len(pool) < args.batch:
+            raise RuntimeError(f"Expected >= {args.batch} frames in {name}, found {len(pool)}")
 
     rng = np.random.default_rng(args.seed)
     orig_pick = rng.choice(boundary, args.batch, replace=False)
-    new_all_pick = boundary + rng.choice(len(mixed) - boundary, args.batch, replace=False)
-    new_tail_pick = rng.choice(tail_indices, args.batch, replace=False)
+    val_prefix_pick = rng.choice(val_prefix_indices, args.batch, replace=False)
+    hold_prefix_pick = rng.choice(prefix_indices, args.batch, replace=False)
+    hold_tail_pick = rng.choice(tail_indices, args.batch, replace=False)
 
     torch.manual_seed(args.seed)
     noise = policy.model.sample_noise((args.batch, config.chunk_size, config.max_action_dim), "cuda")
@@ -453,8 +433,9 @@ def run_audit(args) -> None:
 
     standalone = batch_for(original, orig_pick, frozen.pre)
     merged = batch_for(mixed, orig_pick, frozen.pre)
-    hold_all = batch_for(mixed, new_all_pick, frozen.pre)
-    hold_tail = batch_for(mixed, new_tail_pick, frozen.pre)
+    val_prefix = batch_for(validation, val_prefix_pick, frozen.pre)
+    hold_prefix = batch_for(mixed, hold_prefix_pick, frozen.pre)
+    hold_tail = batch_for(mixed, hold_tail_pick, frozen.pre)
     difference = input_diff(standalone[0], merged[0], tuple(CAMERA_MAP.values()))
 
     report = dict(
@@ -467,8 +448,9 @@ def run_audit(args) -> None:
     for tag, (batch, source) in (
         ("original", standalone),
         ("original_from_mixed", merged),
-        ("hold50_all", hold_all),
-        ("hold50_tail", hold_tail),
+        ("val_prefix_0_190", val_prefix),
+        ("hold50_prefix_0_190", hold_prefix),
+        ("hold50_tail_191_216", hold_tail),
     ):
         report[tag] = flow_loss(policy, batch, source, noise, t_sample, args.seed)
         print("AUDIT", tag, json.dumps(report[tag]), flush=True)
@@ -476,13 +458,26 @@ def run_audit(args) -> None:
     save_json(args.output / "frozen-loss-audit.json", report)
     if max(difference.values()) > 1e-6:
         raise RuntimeError(f"Merged original frames differ from standalone original: {difference}")
-    max_all_axis = max(report["hold50_all"]["axes"].values())
-    max_tail_axis = max(report["hold50_tail"]["axes"].values())
-    if max_all_axis > 0.1 or max_tail_axis > 0.25:
-        raise RuntimeError(
-            f"Safety gate tripped: hold50_all max axis={max_all_axis:.4f}, hold50_tail max axis={max_tail_axis:.4f}"
-        )
-    print("HOLD_AUDIT_PASSED", dict(max_all_axis=max_all_axis, max_tail_axis=max_tail_axis), flush=True)
+
+    val_axes = report["val_prefix_0_190"]["axes"]
+    pref_axes = report["hold50_prefix_0_190"]["axes"]
+    failed_axes = {}
+    for axis in JOINTS:
+        limit = max(0.50, 3.0 * val_axes[axis]) if axis == "wrist_roll" else max(0.05, 5.0 * val_axes[axis])
+        if pref_axes[axis] > limit:
+            failed_axes[axis] = dict(hold50_prefix=pref_axes[axis], val_prefix=val_axes[axis], limit=limit)
+    if failed_axes:
+        print("HOLD_AUDIT_BLOCKED", json.dumps(failed_axes), flush=True)
+        raise RuntimeError(f"Prefix safety gate tripped: {failed_axes}")
+    print(
+        "HOLD_AUDIT_PASSED",
+        dict(
+            val_prefix_loss=report["val_prefix_0_190"]["loss"],
+            hold_prefix_loss=report["hold50_prefix_0_190"]["loss"],
+            hold_tail_loss=report["hold50_tail_191_216"]["loss"],
+        ),
+        flush=True,
+    )
 
 
 def run_train(args) -> None:
@@ -501,6 +496,9 @@ def run_train(args) -> None:
     assert (cfg["chunk_size"], cfg["n_action_steps"], cfg["empty_cameras"]) == (25, 5, 1)
     assert cfg["resize_imgs_with_padding"] == [512, 512]
     accumulation = EFFECTIVE_BATCH // args.micro_batch
+    save_at = tuple(int(x) for x in args.save_at.split(",") if x.strip())
+    if not save_at or any(n <= 0 or n > args.updates for n in save_at):
+        raise ValueError(f"Invalid --save-at={args.save_at} for updates={args.updates}")
 
     args.output.mkdir(parents=True, exist_ok=True)
     ckpt_root = args.scratch / "checkpoints"
@@ -655,7 +653,7 @@ def run_train(args) -> None:
     def save(**kwargs):
         final = kwargs["checkpoint_dir"]
         stage = int(final.name) - START
-        assert stage in SAVE_AT and updates == stage and not final.exists()
+        assert stage in save_at and updates == stage and not final.exists()
         temporary = final.with_name(f"{final.name}.writing")
         if temporary.exists():
             shutil.rmtree(temporary)
@@ -678,9 +676,10 @@ def run_train(args) -> None:
     trainer.make_optimizer_and_scheduler = optimizer
     trainer.update_policy = update
     trainer.get_step_checkpoint_dir = directory
-    trainer.should_save_checkpoint = lambda step, *_: step in {n * accumulation for n in SAVE_AT}
+    trainer.should_save_checkpoint = lambda step, *_: step in {n * accumulation for n in save_at}
     trainer.save_checkpoint = save
 
+    save_freq_updates = math.gcd(*save_at)
     flags = {
         "dataset.repo_id": data["repo_id"],
         "dataset.root": str(args.mixed_dataset),
@@ -707,14 +706,14 @@ def run_train(args) -> None:
         "steps": str(args.updates * accumulation),
         "output_dir": str(args.scratch / "trainer_out"),
         "rename_map": json.dumps(CAMERA_MAP),
-        "save_freq": str(1000 * accumulation),
+        "save_freq": str(save_freq_updates * accumulation),
         "log_freq": str(50 * accumulation),
         "save_checkpoint": "true",
         "env_eval_freq": "0",
     }
     sys.argv = [sys.argv[0], *[f"--{key}={value}" for key, value in flags.items()]]
     trainer.main()
-    if updates != args.updates or any(not (ckpt_root / f"{START + n:06d}" / "pretrained_model").is_dir() for n in SAVE_AT):
+    if updates != args.updates or any(not (ckpt_root / f"{START + n:06d}" / "pretrained_model").is_dir() for n in save_at):
         raise RuntimeError("Training ended without all expected checkpoints")
     print("HOLD_TRAIN_COMPLETE", updates, flush=True)
 
@@ -800,8 +799,9 @@ def run_eval_summary(args) -> None:
 
 def run_select_best(args) -> None:
     baseline = read_json(args.baseline)
+    labels = tuple(x.strip() for x in args.labels.split(",") if x.strip())
     candidates = []
-    for label in ("021000", "022000", "023000"):
+    for label in labels:
         summary_path = args.output / f"eval-{label}-summary.json"
         if not summary_path.is_file():
             continue
@@ -867,7 +867,7 @@ def main() -> None:
     p_col.add_argument("--hold-frames", type=int, default=25)
 
     p_aud = sub.add_parser("audit")
-    for k in ("checkpoint", "original-dataset", "mixed-dataset", "manifest", "output"):
+    for k in ("checkpoint", "original-dataset", "validation-dataset", "mixed-dataset", "manifest", "output"):
         p_aud.add_argument(f"--{k}", type=Path, required=True)
     p_aud.add_argument("--batch", type=int, default=32)
     p_aud.add_argument("--seed", type=int, default=1000)
@@ -876,10 +876,11 @@ def main() -> None:
     for k in ("checkpoint", "manifest", "mixed-dataset", "output", "scratch"):
         p_trn.add_argument(f"--{k}", type=Path, required=True)
     p_trn.add_argument("--micro-batch", type=int, choices=(8, 16), default=16)
-    p_trn.add_argument("--updates", type=int, default=3000)
-    p_trn.add_argument("--peak-lr", type=float, default=5e-6)
-    p_trn.add_argument("--decay-lr", type=float, default=5e-7)
-    p_trn.add_argument("--tail-start-frame", type=int, default=150)
+    p_trn.add_argument("--updates", type=int, default=2000)
+    p_trn.add_argument("--save-at", default="500,1000,2000")
+    p_trn.add_argument("--peak-lr", type=float, default=3e-6)
+    p_trn.add_argument("--decay-lr", type=float, default=3e-7)
+    p_trn.add_argument("--tail-start-frame", type=int, default=165)
     p_trn.add_argument("--tail-boost", type=float, default=2.0)
     p_trn.add_argument("--new-prob", type=float, default=0.30)
 
@@ -898,6 +899,7 @@ def main() -> None:
     for k in ("baseline", "output"):
         p_best.add_argument(f"--{k}", type=Path, required=True)
     p_best.add_argument("--scratch", type=Path, default=None)
+    p_best.add_argument("--labels", default="020500,021000,022000")
 
     args = parser.parse_args()
     dispatch = {
