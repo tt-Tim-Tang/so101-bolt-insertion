@@ -55,7 +55,7 @@ def scene_model(arm: Path, parts: Path, *, target_bore_radius=BORE_RADIUS, show_
         # A concave hole needs multiple convex colliders. Mesh geoms alone would fill the bore.
         is_target = name == "target"
         bore_radius = target_bore_radius if is_target else BORE_RADIUS
-        target_contact = {"solref": ".018 1", "solmix": "50"} if is_target else {}
+        target_contact = {"solref": ".011 1", "solmix": "50"} if is_target else {}
         # Target priority makes the pair use its friction instead of the shaft's higher value.
         wall_material = (dict(target_contact, friction=".28 .005 .0001", priority="1")
                          if is_target else {"friction": ".5 .005 .0001"})
