@@ -18,6 +18,8 @@ TARGET = (0.19, 0.057)
 MOUTH_Z = 0.045
 SHAFT_RADIUS = 0.005
 BORE_RADIUS = 0.0065
+WALL_SEGMENTS = 16
+TARGET_CHAMFER_M = .001
 HOME = np.array([0.35862603, -0.29358862, 0.28302232, 1.58096861, -0.02063390, 0.6])
 
 
@@ -31,6 +33,13 @@ def scene_model(arm: Path, parts: Path, *, target_bore_radius=BORE_RADIUS, show_
     for name in ("base_1", "base_2", "bolt"):
         ET.SubElement(assets, "mesh", name=name, file=(parts / f"{name}.stl").resolve().as_posix(),
                       scale=".001 .001 .001", maxhullvert="128")
+    # Each convex prism continues one bore wall into a 45-degree lead-in.
+    chamfer = TARGET_CHAMFER_M
+    vertices = [(inner if side == 0 else .002, y, z)
+                for z, inner in ((-chamfer, -.002), (0., -.002 + chamfer))
+                for y in (-.0021, .0021) for side in (0, 1)]
+    ET.SubElement(assets, "mesh", name="target_chamfer", vertex=" ".join(
+        str(coordinate) for vertex in vertices for coordinate in vertex))
 
     world = root.find("worldbody")
     ET.SubElement(world, "geom", name="table", type="plane", size=".65 .65 .03", rgba=".22 .25 .28 1")
@@ -53,13 +62,26 @@ def scene_model(arm: Path, parts: Path, *, target_bore_radius=BORE_RADIUS, show_
             ET.SubElement(fixture, "geom", mesh=mesh, type="mesh", rgba=color, contype="0", conaffinity="0")
         collider_style = {"group": "0", "rgba": color} if visible_ring else {"group": "3"}
         # A concave hole needs multiple convex colliders. Mesh geoms alone would fill the bore.
-        bore_radius = target_bore_radius if name == "target" else BORE_RADIUS
-        for i in range(16):
-            angle = i * 2 * np.pi / 16
+        is_target = name == "target"
+        bore_radius = target_bore_radius if is_target else BORE_RADIUS
+        lead_in = chamfer if is_target else 0.
+        target_contact = {"solref": ".018 1", "solmix": "50"} if is_target else {}
+        wall_material = (dict(target_contact, friction=".28 .005 .0001", priority="1")
+                         if is_target else {"friction": ".5 .005 .0001"})
+        for i in range(WALL_SEGMENTS):
+            angle = i * 2 * np.pi / WALL_SEGMENTS
             center = (bore_radius + .002) * np.array([np.cos(angle), np.sin(angle)])
-            ET.SubElement(fixture, "geom", type="box", size=".002 .0021 .016", **collider_style,
-                          pos=f"{center[0]} {center[1]} .024", euler=f"0 0 {angle}", friction=".5 .005 .0001")
-        ET.SubElement(fixture, "geom", type="box", size=".03 .0225 .004", pos="0 0 .004", **collider_style)
+            wall_name = {"name": f"target_wall_{i}"} if is_target else {}
+            ET.SubElement(fixture, "geom", type="box", size=f".002 .0021 {.016 - lead_in / 2}",
+                          pos=f"{center[0]} {center[1]} {.024 - lead_in / 2}", euler=f"0 0 {angle}",
+                          **wall_name, **collider_style, **wall_material)
+            if is_target:
+                ET.SubElement(fixture, "geom", name=f"target_chamfer_{i}", type="mesh", mesh="target_chamfer",
+                              pos=f"{center[0]} {center[1]} {MOUTH_Z - .005}", euler=f"0 0 {angle}",
+                              **collider_style, **wall_material)
+        floor_name = {"name": "target_floor"} if is_target else {}
+        ET.SubElement(fixture, "geom", type="box", size=".03 .0225 .004", pos="0 0 .004",
+                      **floor_name, **collider_style, **target_contact)
 
     bolt = ET.SubElement(world, "body", name="bolt", pos=f"{SOURCE[0]} {SOURCE[1]} .013")
     ET.SubElement(bolt, "freejoint", name="bolt_free")

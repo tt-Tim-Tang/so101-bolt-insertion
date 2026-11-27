@@ -4,7 +4,7 @@ from math import ceil
 import mujoco
 import numpy as np
 
-from .scene import HOME, MOUTH_Z, SHAFT_RADIUS, SOURCE, TARGET, Insertion
+from .scene import HOME, MOUTH_Z, SHAFT_RADIUS, SOURCE, TARGET, WALL_SEGMENTS, Insertion
 
 
 class WideInsertion(Insertion):
@@ -13,19 +13,18 @@ class WideInsertion(Insertion):
     def __init__(self, *, target_bore_radius=.006, control_fps=50):
         super().__init__(max_steps=20 * control_fps, control_fps=control_fps,
                          target_bore_radius=target_bore_radius, show_target_colliders=True)
-        ids = np.flatnonzero(self.model.geom_bodyid == self.model.body("target").id)
-        self.walls, self.floor = ids[:-1], ids[-1]
+        self.walls = np.array([self.model.geom(f"target_wall_{i}").id for i in range(WALL_SEGMENTS)])
+        self.chamfers = np.array([self.model.geom(f"target_chamfer_{i}").id for i in range(WALL_SEGMENTS)])
+        self.floor = self.model.geom("target_floor").id
         self.model.opt.timestep = .002
         self.control_fps = control_fps
         self.substeps = round(1 / (control_fps * self.model.opt.timestep))
-        self.model.geom_solref[ids, 0] = .006
-        self.model.geom_solmix[ids] = 50
         self.floor_z = (self.model.body("target").pos[2] + self.model.geom_pos[self.floor, 2]
                         + self.model.geom_size[self.floor, 2])
         centers = self.model.geom_pos[self.walls, :2]
         self.normals = centers / np.linalg.norm(centers, axis=1)[:, None]
         self.faces = np.linalg.norm(centers, axis=1) - self.model.geom_size[self.walls, 0]
-        assert len(ids) == 17 and np.allclose(self.faces, target_bore_radius) and np.isclose(self.floor_z, .013)
+        assert np.allclose(self.faces, target_bore_radius) and np.isclose(self.floor_z, .013)
 
     def start(self, case):
         mujoco.mj_resetData(self.model, self.data)
