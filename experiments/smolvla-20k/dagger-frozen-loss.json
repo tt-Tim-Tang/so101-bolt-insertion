@@ -1,0 +1,68 @@
+{
+  "checkpoint": "pretrained_model",
+  "seed": 1000,
+  "optimizer_updates": 0,
+  "original_input_max_diff": {
+    "action": 0.0,
+    "action_is_pad": 0.0,
+    "observation.state": 0.0,
+    "observation.images.camera1": 0.0,
+    "observation.images.camera2": 0.0,
+    "observation.language.tokens": 0.0,
+    "observation.language.attention_mask": 0.0
+  },
+  "original": {
+    "loss": 0.0003306941071059555,
+    "axes": {
+      "shoulder_pan": 0.00023109547328203917,
+      "shoulder_lift": 0.0005163535242900252,
+      "elbow_flex": 0.0004109437868464738,
+      "wrist_flex": 0.0002741234202403575,
+      "wrist_roll": 0.000265830778516829,
+      "gripper": 0.00028581771766766906
+    },
+    "valid_steps": 392,
+    "samples": 16,
+    "worst_sample": {
+      "episode": 90,
+      "frame": 102,
+      "loss": 0.0014822721714153886
+    }
+  },
+  "original_from_mixed": {
+    "loss": 0.0003306941071059555,
+    "axes": {
+      "shoulder_pan": 0.00023109547328203917,
+      "shoulder_lift": 0.0005163535242900252,
+      "elbow_flex": 0.0004109437868464738,
+      "wrist_flex": 0.0002741234202403575,
+      "wrist_roll": 0.000265830778516829,
+      "gripper": 0.00028581771766766906
+    },
+    "valid_steps": 392,
+    "samples": 16,
+    "worst_sample": {
+      "episode": 90,
+      "frame": 102,
+      "loss": 0.0014822721714153886
+    }
+  },
+  "dagger": {
+    "loss": 23.5777587890625,
+    "axes": {
+      "shoulder_pan": 0.2741713523864746,
+      "shoulder_lift": 18.256053924560547,
+      "elbow_flex": 3.6847455501556396,
+      "wrist_flex": 4.476724624633789,
+      "wrist_roll": 114.74256896972656,
+      "gripper": 0.03228592127561569
+    },
+    "valid_steps": 394,
+    "samples": 16,
+    "worst_sample": {
+      "episode": 224,
+      "frame": 140,
+      "loss": 69.99166107177734
+    }
+  }
+}

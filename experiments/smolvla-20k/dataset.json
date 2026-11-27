@@ -1,0 +1,9 @@
+{
+  "episodes": 150,
+  "frames": 28649,
+  "added_episodes": 50,
+  "added_frames": 9549,
+  "repo_id": "local/so101_smolvla25_150",
+  "fps": 25,
+  "penetration_limit_mm": 3.0
+}

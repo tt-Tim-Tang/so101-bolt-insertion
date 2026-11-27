@@ -1,0 +1,37 @@
+diff --git a/src/lerobot/policies/smolvla/modeling_smolvla.py b/src/lerobot/policies/smolvla/modeling_smolvla.py
+index 2ac63b99..80b90c02 100644
+--- a/src/lerobot/policies/smolvla/modeling_smolvla.py
++++ b/src/lerobot/policies/smolvla/modeling_smolvla.py
+@@ -80,6 +80,7 @@ from .smolvlm_with_expert import SmolVLMWithExpertModel
+ 
+ 
+ class ActionSelectKwargs(TypedDict, total=False):
++    correct_padding_velocity: bool
+     inference_delay: int | None
+     prev_chunk_left_over: Tensor | None
+     execution_horizon: int | None
+@@ -756,13 +757,21 @@ class VLAFlowMatching(nn.Module):
+         )
+         num_steps = self.config.num_steps
+ 
+-        return euler_integrate(
+-            lambda input_x_t, current_timestep: self.denoise_step(
++        def denoise(input_x_t, current_timestep):
++            velocity = self.denoise_step(
+                 x_t=input_x_t,
+                 prefix_pad_masks=prefix_pad_masks,
+                 past_key_values=past_key_values,
+                 timestep=current_timestep,
+-            ),
++            )
++            if kwargs.get("correct_padding_velocity", False):
++                active_dim = self.config.action_feature.shape[0]
++                # Zero clean padding gives x_pad(t) = t * noise_pad and dx_pad/dt = noise_pad.
++                velocity = torch.cat((velocity[..., :active_dim], noise[..., active_dim:].to(velocity.dtype)), dim=-1)
++            return velocity
++
++        return euler_integrate(
++            denoise,
+             noise,
+             num_steps,
+             rtc_processor=self.rtc_processor,
