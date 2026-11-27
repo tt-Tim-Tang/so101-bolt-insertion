@@ -72,7 +72,7 @@ if [[ "$phase" == "audit" || "$phase" == "all" ]]; then
     --seed 1000
 fi
 
-if [[ "$phase" == "train" || "$phase" == "all" ]]; then
+if [[ "$phase" == "train" || "$phase" == "train-eval" || "$phase" == "all" ]]; then
   "$py" -u -m examples.so101_insertion.smolvla_hold_finetune train \
     --checkpoint "$ckpt20k" \
     --manifest "$out/dataset.json" \
@@ -88,7 +88,7 @@ if [[ "$phase" == "train" || "$phase" == "all" ]]; then
     --new-prob 0.30
 fi
 
-if [[ "$phase" == "eval" || "$phase" == "all" ]]; then
+if [[ "$phase" == "eval" || "$phase" == "train-eval" || "$phase" == "all" ]]; then
   for label in 021000 022000 023000; do
     edir="$out/eval-$label"
     mkdir -p "$edir"
