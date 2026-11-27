@@ -254,7 +254,10 @@ def run_audit(args) -> None:
     import torch
 
     from examples.so101_insertion.smolvla25_train import CAMERA_MAP, verify_processor_stats
-    from examples.so101_insertion.smolvla_dagger_loss_audit import batch_for, flow_loss, input_diff, load_dataset
+    try:
+        from smolvla_dagger_loss_audit import batch_for, flow_loss, input_diff, load_dataset
+    except ImportError:
+        from examples.so101_insertion.smolvla_dagger_loss_audit import batch_for, flow_loss, input_diff, load_dataset
     from examples.so101_insertion.smolvla_rlt_stage2 import FrozenSmolVLA
 
     if args.checkpoint.resolve().parent.name != "020000":
