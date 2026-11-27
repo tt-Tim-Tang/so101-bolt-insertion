@@ -141,7 +141,7 @@ def save_success(folder,row,frames):
     return path.name
 
 
-def display(env, obs, title, index, count, frames, status):
+def display(env, obs, index, count, frames, status):
     rgb = np.concatenate([obs[k] for k in CAMERAS],axis=1)
     image = cv2.cvtColor(cv2.resize(rgb,(896,448)),cv2.COLOR_RGB2BGR)
     image = cv2.copyMakeBorder(image,0,105,0,0,cv2.BORDER_CONSTANT,value=(22,22,22))
@@ -153,7 +153,7 @@ def display(env, obs, title, index, count, frames, status):
              f"N next  |  B previous  |  Backspace reset  |  Esc exit     Frames: {frames}   {status}"]
     for i,line in enumerate(lines):
         cv2.putText(image,line,(14,474+22*i),cv2.FONT_HERSHEY_SIMPLEX,.56,(235,235,235),1,cv2.LINE_AA)
-    cv2.imshow(title,image)
+    return cv2.cvtColor(image,cv2.COLOR_BGR2RGB)
 
 
 def play(args):
@@ -162,7 +162,6 @@ def play(args):
     if not cases:
         raise ValueError("No real stalled states were captured")
     env = SmolVLAInsertion(penetration_limit_mm=LIMIT_MM)
-    title = "SO-101 insertion | Human takeover"
     try:
         if args.check:
             for row in cases:
@@ -171,32 +170,40 @@ def play(args):
                 assert np.isfinite(action).all() and np.allclose(action[4],row["initial_ctrl"][4])
             print("RESTORE_OK",len(cases),flush=True)
             return
-        cv2.namedWindow(title,cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(title,896,553)
+        import tkinter as tk
+
+        from PIL import Image, ImageTk
+
+        window = tk.Tk()
+        window.title("SO-101 insertion | Human takeover")
+        picture = tk.Label(window)
+        picture.pack()
         current = 0
         row = cases[current]
         restore(env,args.snapshots,row)
         frames, status = [], "Paused"
         finished = False
-        while True:
-            display(env,env.observation(),title,row["index"],f"{current+1}/{len(cases)}",len(frames),status)
-            code = cv2.waitKey(50)
-            while code < 0:
-                if cv2.getWindowProperty(title,cv2.WND_PROP_VISIBLE) < 1:
-                    return
-                code = cv2.waitKey(50)
-            code &= 255
-            if code == 27:
-                break
-            key = chr(code).lower()
-            if key in ("n","b") or code in (8,127):
+
+        def refresh():
+            image = display(env,env.observation(),row["index"],f"{current+1}/{len(cases)}",len(frames),status)
+            picture.image = ImageTk.PhotoImage(Image.fromarray(image))
+            picture.configure(image=picture.image)
+
+        def on_key(event):
+            nonlocal current,row,frames,status,finished
+            if event.keysym == "Escape":
+                window.destroy()
+                return
+            key = event.char.lower()
+            if key in ("n","b") or event.keysym == "BackSpace":
                 current = (current+(key=="n")-(key=="b"))%len(cases)
                 row = cases[current]
                 restore(env,args.snapshots,row)
                 frames,status,finished = [],"Paused",False
-                continue
+                refresh()
+                return
             if finished or (key not in MOVE and key not in ("r","f"," ")):
-                continue
+                return
             for _ in range(5 if key==" " else 1):
                 action = jog(env,key)
                 frames.append(env.observation()|dict(action=action.copy()))
@@ -211,10 +218,14 @@ def play(args):
                         status = "Slip" if info["slipped"] else "Penetration" if info["penetration_failure"] else "Time limit"
                     break
                 status = "Paused"
+            refresh()
+
+        window.bind("<KeyPress>",on_key)
+        refresh()
+        window.focus_force()
+        window.mainloop()
     finally:
         env.close()
-        if not args.check:
-            cv2.destroyAllWindows()
 
 
 def main():
