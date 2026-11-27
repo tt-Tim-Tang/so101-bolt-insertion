@@ -86,7 +86,8 @@ def export(args):
 def summarize(folder):
     rows = [json.loads(f.read_text()) for f in sorted(folder.glob("[0-9]*.json"))]
     captured = [row for row in rows if row["captured"]]
-    captured.sort(key=lambda row:(row["previous_reason"]!="seating_near_miss",-row["depth_mm"],row["index"]))
+    captured.sort(key=lambda row:(row["previous_reason"]=="success",row["previous_reason"]!="seating_near_miss",
+                                  -row["depth_mm"],row["index"]))
     first = captured[:10]
     write_json(folder/"manifest.json",dict(fps=FPS,penetration_limit_mm=LIMIT_MM,
                attempted=len(rows),captured=len(captured),cases=first,reserve=captured[10:]))
