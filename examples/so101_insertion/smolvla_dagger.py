@@ -20,6 +20,7 @@ DAGGER_ID = "local/so101_smolvla25_dagger"
 MIXED_ID = "local/so101_smolvla25_dagger_mixed"
 LIMIT_MM = 3.
 GATE_SIZE = 25
+COLLECTION_SIZE = 120
 STATS = "observation.state"
 
 
@@ -66,7 +67,7 @@ class StallInsertion(EndToEndTelemetry):
             raise RuntimeError("Teacher changed the locked wrist_roll command")
         rise = float(self.data.body(self.bolt_id).xpos[2]-self.teacher.start_tip[2])*1000
         self.peak_rise_mm = max(self.peak_rise_mm,rise)
-        return value, done or bool(info["slipped"]), timeout, info
+        return value, done or bool(info["slipped"]), timeout or self.teacher.tick >= self.teacher.ticks, info
 
 
 def locked_bolt_ik(env, position, axis, wrist_roll):
@@ -125,6 +126,8 @@ class LockedRollTeacher:
         self.align_ticks = FPS
         # Match the original expert's 65 ticks at 50 Hz, scaled to the local descent distance.
         self.down_per_tick = (MOUTH_Z+.005-self.bottom)/np.ceil(65*FPS/50)
+        descent_ticks = int(np.ceil(max(0.,self.lift_z-self.bottom)/self.down_per_tick))
+        self.ticks = self.align_ticks + descent_ticks + 75
 
     def next_command(self, env):
         if self.tick:
@@ -186,12 +189,20 @@ def screen(args, features, env):
         baseline,_ = replay(env,features,row["case"],row["seed"],corrected=True)
         row["base"] = {k:baseline[k] for k in ("success","slipped","opened_early","timeout","steps","max_penetration_mm")}
         row["base"]["reason"] = failure_mode(baseline,env)[0]
-        save_json(path,row)
+        if args.phase == "collect" and not baseline["success"]:
+            teacher_env = StallInsertion(penetration_limit_mm=LIMIT_MM)
+            try:
+                record_takeover(teacher_env,features,row,path)
+            finally:
+                teacher_env.close()
+        else:
+            save_json(path,row)
         print("SCREEN",i,row["base"]["reason"] or "success",flush=True)
 
 
 def dry_run(args,features,env):
-    failed = [p for p in sorted(args.screened.glob("[0-9]*.json"))
+    source = args.screened or args.output/"screen"
+    failed = [p for p in sorted(source.glob("[0-9]*.json"))
               if not json.loads(p.read_text())["base"]["success"]][:GATE_SIZE]
     if len(failed) != GATE_SIZE:
         raise ValueError("Expected the original 25 screened failures")
@@ -202,23 +213,26 @@ def dry_run(args,features,env):
         if result.exists():
             continue
         row = json.loads(path.read_text())
-        end,_ = replay(env,features,row["case"],row["seed"],corrected=True)
-        clean = bool(env.takeover and end["success"] and not end["slipped"] and not end["opened_early"]
-                     and not end["penetration_failure"])
-        reason = failure_mode(end,env)[0]
-        if clean:
-            save_frames(result.with_suffix(".npz"),env.frames)
-        teacher = dict(success=clean,inserted_without_takeover=bool(end["success"] and not env.takeover),
-                       reason="success" if clean else reason or "no_clean_takeover",slipped=end["slipped"],
-                       opened_early=end["opened_early"],timeout=end["timeout"],frames=len(env.frames) if clean else 0,
-                       takeover_frames=len(env.frames),first_jump_mrad=env.first_jump_mrad,peak_jump_mrad=env.peak_jump_mrad,
-                       peak_rise_mm=env.peak_rise_mm,max_penetration_mm=end["max_penetration_mm"],
-                       max_depth_mm=env.max_near_depth_mm,
-                       wrist_roll_rad=env.teacher.wrist_roll if env.teacher else None)
-        case = {k:row[k] for k in ("index","seed","case","base")}
-        save_json(result,case | dict(takeover=env.takeover,teacher=teacher))
-        print("TEACH_GATE",row["index"],env.takeover,teacher,flush=True)
+        record_takeover(env,features,row,result)
 
+
+def record_takeover(env,features,row,result):
+    end,_ = replay(env,features,row["case"],row["seed"],corrected=True)
+    clean = bool(env.takeover and end["success"] and not end["slipped"] and not end["opened_early"]
+                 and not end["penetration_failure"])
+    reason = failure_mode(end,env)[0]
+    if clean:
+        save_frames(result.with_suffix(".npz"),env.frames)
+    teacher = dict(success=clean,inserted_without_takeover=bool(end["success"] and not env.takeover),
+                   reason="success" if clean else reason or "no_clean_takeover",slipped=end["slipped"],
+                   opened_early=end["opened_early"],timeout=end["timeout"],frames=len(env.frames) if clean else 0,
+                   takeover_frames=len(env.frames),first_jump_mrad=env.first_jump_mrad,peak_jump_mrad=env.peak_jump_mrad,
+                   peak_rise_mm=env.peak_rise_mm,max_penetration_mm=end["max_penetration_mm"],
+                   max_depth_mm=env.max_near_depth_mm,
+                   wrist_roll_rad=env.teacher.wrist_roll if env.teacher else None)
+    case = {k:row[k] for k in ("index","seed","case","base")}
+    save_json(result,case | dict(takeover=env.takeover,teacher=teacher))
+    print("TEACH_GATE",row["index"],env.takeover,teacher,flush=True)
 
 def report_gate(args):
     rows = [json.loads(p.read_text()) for p in paths(args,args.gate_dir)]
@@ -226,6 +240,7 @@ def report_gate(args):
     saved = [r["teacher"] for r in rows]
     rescued = sum(r["success"] for r in saved)
     result = dict(episodes=len(rows),rescued=rescued,slips=sum(bool(r["slipped"]) for r in saved),
+                  passed=rescued>=18 and not any(r["slipped"] for r in saved),
                   takeovers=sum(r["takeover"] is not None for r in rows),
                   inserted_without_takeover=sum(r["inserted_without_takeover"] for r in saved),
                   average_success_frames=float(np.mean([r["frames"] for r in saved if r["success"]])) if rescued else None,
@@ -244,9 +259,13 @@ def build_dataset(args):
         raise RuntimeError("Wrong original 150-episode dataset")
     if list(original.tasks.index)!=[TASK] or set(original.camera_keys)!=set(CAMERAS):
         raise RuntimeError("Original dataset task text or camera keys differ")
-    rows = [(json.loads(p.read_text()),p.with_suffix(".npz")) for p in paths(args,args.gate_dir)]
-    assert len(rows)==GATE_SIZE
-    selected = [(r,p) for r,p in rows if r["teacher"]["success"]]
+    rows = [(json.loads(p.read_text()),p.with_suffix(".npz")) for p in paths(args,args.gate_dir if args.audit_dataset else "collect")]
+    selected = [(r,p) for r,p in rows if r.get("teacher",{}).get("success")]
+    if args.audit_dataset:
+        assert len(rows)==GATE_SIZE
+    else:
+        selected = selected[:COLLECTION_SIZE]
+        assert len(selected)==COLLECTION_SIZE
     if not selected:
         print("No successful teacher clips to audit",flush=True)
         return
@@ -286,6 +305,8 @@ def build_dataset(args):
     save_json(args.output/"dataset.json",report)
     print("DAGGER_DATASET",{k:v for k,v in report.items() if k!="selected"},flush=True)
 
+    if not args.audit_dataset:
+        return
     videos = args.output/"videos"
     videos.mkdir(exist_ok=True)
     for row,file in selected[:3]:
@@ -340,9 +361,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("checkpoint","monitor","episodes","baseline","splits","output","original"):
         parser.add_argument(f"--{name}",required=True,type=Path)
-    parser.add_argument("--phase",required=True,choices=("plan","screen","gate","gate-report","dataset","eval","summary"))
+    parser.add_argument("--phase",required=True,choices=("plan","screen","gate","gate-report","collect","dataset","eval","summary"))
     parser.add_argument("--gate-dir",default="gate")
     parser.add_argument("--screened",type=Path)
+    parser.add_argument("--audit-dataset",action="store_true")
     parser.add_argument("--start",type=int,default=0)
     parser.add_argument("--stop",type=int)
     parser.add_argument("--shard",type=int,default=0)
@@ -366,8 +388,6 @@ def main():
         try:
             features = FrozenSmolVLA(args.checkpoint)
             if args.phase=="gate":
-                if args.screened is None:
-                    parser.error("--screened is required for the original gate cases")
                 dry_run(args,features,env)
             elif args.phase=="eval":
                 evaluate(args,env,features,held)
