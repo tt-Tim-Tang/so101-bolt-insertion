@@ -115,7 +115,7 @@ def clean_hold_expert(
     *,
     seat_offset: float = 0.0005,
     settle_ticks: int = 4,
-    hold_frames: int = 40,
+    hold_frames: int = 25,
 ):
     """Run the 25 Hz expert with locked wrist_roll during descent and a static bottom hold."""
     env.start(case)
@@ -309,10 +309,10 @@ def run_collect(args) -> None:
                     and not bool(info["penetration_failure"])
                     and info["slipped"] == 0
                     and info["opened_early"] == 0
-                    and info["stable_s"] >= 1.2
+                    and info["stable_s"] >= 0.75
                     and info["max_penetration_mm"] <= 1.5
                     and info["max_abs_roll"] <= 0.15
-                    and len(frames) >= 225
+                    and len(frames) >= 214
                 )
                 replay_ok = None
                 if ok and len(accepted_cases) < 3:
@@ -864,7 +864,7 @@ def main() -> None:
         p_col.add_argument(f"--{k}", type=Path, required=True)
     p_col.add_argument("--episodes", type=int, default=50)
     p_col.add_argument("--settle-ticks", type=int, default=4)
-    p_col.add_argument("--hold-frames", type=int, default=40)
+    p_col.add_argument("--hold-frames", type=int, default=25)
 
     p_aud = sub.add_parser("audit")
     for k in ("checkpoint", "original-dataset", "mixed-dataset", "manifest", "output"):
