@@ -1,0 +1,967 @@
+{
+  "control_hz": 25,
+  "penetration_limit_mm": 3.0,
+  "corrected": true,
+  "episodes": 30,
+  "insertions": 25,
+  "slips": 0,
+  "slip_events": 0,
+  "timeouts": 3,
+  "penetration": 2,
+  "wrist_p95_mm": 4.794287599443966,
+  "failed": {
+    "seating_near_miss": 4,
+    "deep_jam": 1
+  },
+  "timeout_modes": {
+    "seating_near_miss": 2,
+    "deep_jam": 1
+  },
+  "recovered": [
+    3,
+    6,
+    8,
+    11,
+    17,
+    18
+  ],
+  "regressed": [
+    13,
+    28
+  ],
+  "rows": [
+    {
+      "index": 0,
+      "seed": 270133624,
+      "case": {
+        "target": [
+          16.58590295627142,
+          16.670198012403375
+        ],
+        "source": [
+          0,
+          0
+        ],
+        "joints": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "noise": 270133624
+      },
+      "success": true,
+      "slipped": 0,
+      "timeout": false,
+      "penetration_failure": false,
+      "max_penetration_mm": 0.5525400425817901,
+      "stable_s": 0.23800000000000002,
+      "max_held_depth_mm": 32.01863374934705,
+      "failure_mode": null,
+      "steps": 188
+    },
+    {
+      "index": 1,
+      "seed": 1598601603,
+      "case": {
+        "target": [
+          -5.612575834856292,
+          2.695634080066
+        ],
+        "source": [
+          0,
+          0
+        ],
+        "joints": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "noise": 1598601603
+      },
+      "success": true,
+      "slipped": 0,
+      "timeout": false,
+      "penetration_failure": false,
+      "max_penetration_mm": 0.7708158547273497,
+      "stable_s": 0.234,
+      "max_held_depth_mm": 31.816361980582325,
+      "failure_mode": null,
+      "steps": 185
+    },
+    {
+      "index": 2,
+      "seed": 1589574587,
+      "case": {
+        "target": [
+          10.601650604302115,
+          -2.9169122174553195
+        ],
+        "source": [
+          0,
+          0
+        ],
+        "joints": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "noise": 1589574587
+      },
+      "success": false,
+      "slipped": 0,
+      "timeout": false,
+      "penetration_failure": true,
+      "max_penetration_mm": 3.098859953144157,
+      "stable_s": 0.168,
+      "max_held_depth_mm": 30.64612666168028,
+      "failure_mode": "seating_near_miss",
+      "steps": 214
+    },
+    {
+      "index": 3,
+      "seed": 991878707,
+      "case": {
+        "target": [
+          5.894328143998738,
+          14.85320012542865
+        ],
+        "source": [
+          0,
+          0
+        ],
+        "joints": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "noise": 991878707
+      },
+      "success": true,
+      "slipped": 0,
+      "timeout": false,
+      "penetration_failure": false,
+      "max_penetration_mm": 0.9443988339573575,
+      "stable_s": 0.228,
+      "max_held_depth_mm": 30.745750667102353,
+      "failure_mode": null,
+      "steps": 187
+    },
+    {
+      "index": 4,
+      "seed": 797818111,
+      "case": {
+        "target": [
+          -17.275744273575437,
+          12.560307771707677
+        ],
+        "source": [
+          0,
+          0
+        ],
+        "joints": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "noise": 797818111
+      },
+      "success": true,
+      "slipped": 0,
+      "timeout": false,
+      "penetration_failure": false,
+      "max_penetration_mm": 0.6566913263068533,
+      "stable_s": 0.23600000000000002,
+      "max_held_depth_mm": 32.23648654979339,
+      "failure_mode": null,
+      "steps": 195
+    },
+    {
+      "index": 5,
+      "seed": 206790120,
+      "case": {
+        "target": [
+          11.769885935316253,
+          12.124826898594804
+        ],
+        "source": [
+          0,
+          0
+        ],
+        "joints": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "noise": 206790120
+      },
+      "success": false,
+      "slipped": 0,
+      "timeout": true,
+      "penetration_failure": false,
+      "max_penetration_mm": 2.922591568251185,
+      "stable_s": 0.166,
+      "max_held_depth_mm": 30.625681626603743,
+      "failure_mode": "seating_near_miss",
+      "steps": 500
+    },
+    {
+      "index": 6,
+      "seed": 990170611,
+      "case": {
+        "target": [
+          -2.8945717729135225,
+          -14.02638982552614
+        ],
+        "source": [
+          0,
+          0
+        ],
+        "joints": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "noise": 990170611
+      },
+      "success": true,
+      "slipped": 0,
+      "timeout": false,
+      "penetration_failure": false,
+      "max_penetration_mm": 0.7624403223041432,
+      "stable_s": 0.228,
+      "max_held_depth_mm": 31.470627210045905,
+      "failure_mode": null,
+      "steps": 185
+    },
+    {
+      "index": 7,
+      "seed": 598888298,
+      "case": {
+        "target": [
+          -12.947724679864871,
+          13.461147866397177
+        ],
+        "source": [
+          0,
+          0
+        ],
+        "joints": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "noise": 598888298
+      },
+      "success": true,
+      "slipped": 0,
+      "timeout": false,
+      "penetration_failure": false,
+      "max_penetration_mm": 0.47225348528467903,
+      "stable_s": 0.23,
+      "max_held_depth_mm": 31.700547261190447,
+      "failure_mode": null,
+      "steps": 191
+    },
+    {
+      "index": 8,
+      "seed": 1404886701,
+      "case": {
+        "target": [
+          4.883843168056568,
+          -9.614877154358725
+        ],
+        "source": [
+          0,
+          0
+        ],
+        "joints": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "noise": 1404886701
+      },
+      "success": true,
+      "slipped": 0,
+      "timeout": false,
+      "penetration_failure": false,
+      "max_penetration_mm": 2.305461358416054,
+      "stable_s": 0.232,
+      "max_held_depth_mm": 31.296885669380917,
+      "failure_mode": null,
+      "steps": 193
+    },
+    {
+      "index": 9,
+      "seed": 390112675,
+      "case": {
+        "target": [
+          -15.515222955787284,
+          8.889600849056762
+        ],
+        "source": [
+          0,
+          0
+        ],
+        "joints": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "noise": 390112675
+      },
+      "success": true,
+      "slipped": 0,
+      "timeout": false,
+      "penetration_failure": false,
+      "max_penetration_mm": 1.581819341023461,
+      "stable_s": 0.232,
+      "max_held_depth_mm": 30.932676442958467,
+      "failure_mode": null,
+      "steps": 194
+    },
+    {
+      "index": 10,
+      "seed": 1155906948,
+      "case": {
+        "target": [
+          -7.781269560970912,
+          1.371516116409314
+        ],
+        "source": [
+          0,
+          0
+        ],
+        "joints": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "noise": 1155906948
+      },
+      "success": true,
+      "slipped": 0,
+      "timeout": false,
+      "penetration_failure": false,
+      "max_penetration_mm": 1.7406714923665698,
+      "stable_s": 0.2,
+      "max_held_depth_mm": 30.64711550299544,
+      "failure_mode": null,
+      "steps": 186
+    },
+    {
+      "index": 11,
+      "seed": 780713222,
+      "case": {
+        "target": [
+          1.997014402335143,
+          8.730354225464474
+        ],
+        "source": [
+          0,
+          0
+        ],
+        "joints": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "noise": 780713222
+      },
+      "success": true,
+      "slipped": 0,
+      "timeout": false,
+      "penetration_failure": false,
+      "max_penetration_mm": 2.504666244257937,
+      "stable_s": 0.232,
+      "max_held_depth_mm": 30.04416184496277,
+      "failure_mode": null,
+      "steps": 222
+    },
+    {
+      "index": 12,
+      "seed": 478882094,
+      "case": {
+        "target": [
+          -1.2264397487058396,
+          -17.64872515972596
+        ],
+        "source": [
+          0,
+          0
+        ],
+        "joints": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "noise": 478882094
+      },
+      "success": false,
+      "slipped": 0,
+      "timeout": true,
+      "penetration_failure": false,
+      "max_penetration_mm": 2.7570927800694607,
+      "stable_s": 0.078,
+      "max_held_depth_mm": 30.49225156416814,
+      "failure_mode": "seating_near_miss",
+      "steps": 500
+    },
+    {
+      "index": 13,
+      "seed": 488426009,
+      "case": {
+        "target": [
+          -3.8295504622907295,
+          12.179487984112054
+        ],
+        "source": [
+          0,
+          0
+        ],
+        "joints": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "noise": 488426009
+      },
+      "success": false,
+      "slipped": 0,
+      "timeout": false,
+      "penetration_failure": true,
+      "max_penetration_mm": 3.165415729452613,
+      "stable_s": 0.156,
+      "max_held_depth_mm": 30.975814571287856,
+      "failure_mode": "seating_near_miss",
+      "steps": 224
+    },
+    {
+      "index": 14,
+      "seed": 1589076903,
+      "case": {
+        "target": [
+          -14.417077278085792,
+          7.578001660329075
+        ],
+        "source": [
+          0,
+          0
+        ],
+        "joints": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "noise": 1589076903
+      },
+      "success": true,
+      "slipped": 0,
+      "timeout": false,
+      "penetration_failure": false,
+      "max_penetration_mm": 1.1980837838640623,
+      "stable_s": 0.226,
+      "max_held_depth_mm": 30.499190188946244,
+      "failure_mode": null,
+      "steps": 186
+    },
+    {
+      "index": 15,
+      "seed": 1863880711,
+      "case": {
+        "target": [
+          3.660244435240781,
+          4.966243618485027
+        ],
+        "source": [
+          0,
+          0
+        ],
+        "joints": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "noise": 1863880711
+      },
+      "success": true,
+      "slipped": 0,
+      "timeout": false,
+      "penetration_failure": false,
+      "max_penetration_mm": 0.7217273251092597,
+      "stable_s": 0.228,
+      "max_held_depth_mm": 31.50252294220099,
+      "failure_mode": null,
+      "steps": 190
+    },
+    {
+      "index": 16,
+      "seed": 179717250,
+      "case": {
+        "target": [
+          6.77176132102932,
+          -14.923615621993513
+        ],
+        "source": [
+          0,
+          0
+        ],
+        "joints": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "noise": 179717250
+      },
+      "success": true,
+      "slipped": 0,
+      "timeout": false,
+      "penetration_failure": false,
+      "max_penetration_mm": 2.29685735626315,
+      "stable_s": 0.228,
+      "max_held_depth_mm": 30.468070317289826,
+      "failure_mode": null,
+      "steps": 197
+    },
+    {
+      "index": 17,
+      "seed": 1940912227,
+      "case": {
+        "target": [
+          1.9962814936314182,
+          12.957199464402049
+        ],
+        "source": [
+          0,
+          0
+        ],
+        "joints": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "noise": 1940912227
+      },
+      "success": true,
+      "slipped": 0,
+      "timeout": false,
+      "penetration_failure": false,
+      "max_penetration_mm": 1.3096338451706562,
+      "stable_s": 0.216,
+      "max_held_depth_mm": 30.933288952477554,
+      "failure_mode": null,
+      "steps": 190
+    },
+    {
+      "index": 18,
+      "seed": 1490260114,
+      "case": {
+        "target": [
+          0.8675456407736775,
+          -4.144382888097821
+        ],
+        "source": [
+          0,
+          0
+        ],
+        "joints": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "noise": 1490260114
+      },
+      "success": true,
+      "slipped": 0,
+      "timeout": false,
+      "penetration_failure": false,
+      "max_penetration_mm": 0.8873229758256079,
+      "stable_s": 0.23,
+      "max_held_depth_mm": 30.65353368229863,
+      "failure_mode": null,
+      "steps": 187
+    },
+    {
+      "index": 19,
+      "seed": 840617801,
+      "case": {
+        "target": [
+          -17.039842095499306,
+          16.313467805487697
+        ],
+        "source": [
+          0,
+          0
+        ],
+        "joints": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "noise": 840617801
+      },
+      "success": true,
+      "slipped": 0,
+      "timeout": false,
+      "penetration_failure": false,
+      "max_penetration_mm": 0.8506174507177992,
+      "stable_s": 0.228,
+      "max_held_depth_mm": 32.44444161842743,
+      "failure_mode": null,
+      "steps": 188
+    },
+    {
+      "index": 20,
+      "seed": 1620772776,
+      "case": {
+        "target": [
+          -14.183466749910636,
+          -3.6553458046520326
+        ],
+        "source": [
+          0,
+          0
+        ],
+        "joints": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "noise": 1620772776
+      },
+      "success": true,
+      "slipped": 0,
+      "timeout": false,
+      "penetration_failure": false,
+      "max_penetration_mm": 2.107476214033446,
+      "stable_s": 0.226,
+      "max_held_depth_mm": 30.287693870246617,
+      "failure_mode": null,
+      "steps": 196
+    },
+    {
+      "index": 21,
+      "seed": 1760298430,
+      "case": {
+        "target": [
+          -17.887785344854983,
+          -3.2969916170822806
+        ],
+        "source": [
+          0,
+          0
+        ],
+        "joints": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "noise": 1760298430
+      },
+      "success": true,
+      "slipped": 0,
+      "timeout": false,
+      "penetration_failure": false,
+      "max_penetration_mm": 0.5185971481675846,
+      "stable_s": 0.23800000000000002,
+      "max_held_depth_mm": 32.192209041767605,
+      "failure_mode": null,
+      "steps": 187
+    },
+    {
+      "index": 22,
+      "seed": 300734394,
+      "case": {
+        "target": [
+          17.611361173524607,
+          11.43355963214147
+        ],
+        "source": [
+          0,
+          0
+        ],
+        "joints": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "noise": 300734394
+      },
+      "success": true,
+      "slipped": 0,
+      "timeout": false,
+      "penetration_failure": false,
+      "max_penetration_mm": 1.27444270208163,
+      "stable_s": 0.234,
+      "max_held_depth_mm": 31.246582144280776,
+      "failure_mode": null,
+      "steps": 185
+    },
+    {
+      "index": 23,
+      "seed": 841725495,
+      "case": {
+        "target": [
+          8.165333177815867,
+          10.426153481687926
+        ],
+        "source": [
+          0,
+          0
+        ],
+        "joints": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "noise": 841725495
+      },
+      "success": true,
+      "slipped": 0,
+      "timeout": false,
+      "penetration_failure": false,
+      "max_penetration_mm": 0.8151885281978379,
+      "stable_s": 0.232,
+      "max_held_depth_mm": 31.14526409381442,
+      "failure_mode": null,
+      "steps": 195
+    },
+    {
+      "index": 24,
+      "seed": 452334635,
+      "case": {
+        "target": [
+          17.483701497539833,
+          -9.707545991988704
+        ],
+        "source": [
+          0,
+          0
+        ],
+        "joints": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "noise": 452334635
+      },
+      "success": true,
+      "slipped": 0,
+      "timeout": false,
+      "penetration_failure": false,
+      "max_penetration_mm": 1.08926400127,
+      "stable_s": 0.228,
+      "max_held_depth_mm": 31.196218169951663,
+      "failure_mode": null,
+      "steps": 186
+    },
+    {
+      "index": 25,
+      "seed": 706060771,
+      "case": {
+        "target": [
+          3.8263890016078186,
+          3.4715404384866666
+        ],
+        "source": [
+          0,
+          0
+        ],
+        "joints": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "noise": 706060771
+      },
+      "success": true,
+      "slipped": 0,
+      "timeout": false,
+      "penetration_failure": false,
+      "max_penetration_mm": 2.8429942813684397,
+      "stable_s": 0.23,
+      "max_held_depth_mm": 29.948555959012392,
+      "failure_mode": null,
+      "steps": 221
+    },
+    {
+      "index": 26,
+      "seed": 166672044,
+      "case": {
+        "target": [
+          9.662177850320937,
+          4.145293867179689
+        ],
+        "source": [
+          0,
+          0
+        ],
+        "joints": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "noise": 166672044
+      },
+      "success": true,
+      "slipped": 0,
+      "timeout": false,
+      "penetration_failure": false,
+      "max_penetration_mm": 0.8289786867883919,
+      "stable_s": 0.23600000000000002,
+      "max_held_depth_mm": 31.135905147914915,
+      "failure_mode": null,
+      "steps": 189
+    },
+    {
+      "index": 27,
+      "seed": 1316536622,
+      "case": {
+        "target": [
+          -14.398960049455766,
+          7.2378817935745445
+        ],
+        "source": [
+          0,
+          0
+        ],
+        "joints": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "noise": 1316536622
+      },
+      "success": true,
+      "slipped": 0,
+      "timeout": false,
+      "penetration_failure": false,
+      "max_penetration_mm": 1.7132461641544212,
+      "stable_s": 0.23,
+      "max_held_depth_mm": 31.085454695778978,
+      "failure_mode": null,
+      "steps": 185
+    },
+    {
+      "index": 28,
+      "seed": 1565556562,
+      "case": {
+        "target": [
+          3.389374957139534,
+          -13.842916380772746
+        ],
+        "source": [
+          0,
+          0
+        ],
+        "joints": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "noise": 1565556562
+      },
+      "success": false,
+      "slipped": 0,
+      "timeout": true,
+      "penetration_failure": false,
+      "max_penetration_mm": 2.523897107360432,
+      "stable_s": 0.0,
+      "max_held_depth_mm": 29.5360920997031,
+      "failure_mode": "deep_jam",
+      "steps": 500
+    },
+    {
+      "index": 29,
+      "seed": 1104725731,
+      "case": {
+        "target": [
+          -8.091122840213146,
+          -15.643955598578621
+        ],
+        "source": [
+          0,
+          0
+        ],
+        "joints": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "noise": 1104725731
+      },
+      "success": true,
+      "slipped": 0,
+      "timeout": false,
+      "penetration_failure": false,
+      "max_penetration_mm": 0.8367408728141146,
+      "stable_s": 0.21,
+      "max_held_depth_mm": 32.03191787003574,
+      "failure_mode": null,
+      "steps": 189
+    }
+  ],
+  "solref_time_constant_s": 0.011,
+  "wall_friction": 0.28,
+  "chamfer_mm": 0
+}
