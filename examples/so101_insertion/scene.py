@@ -66,6 +66,7 @@ def scene_model(arm: Path, parts: Path, *, target_bore_radius=BORE_RADIUS, show_
         bore_radius = target_bore_radius if is_target else BORE_RADIUS
         lead_in = chamfer if is_target else 0.
         target_contact = {"solref": ".018 1", "solmix": "50"} if is_target else {}
+        # Target priority makes the pair use its friction instead of the shaft's higher value.
         wall_material = (dict(target_contact, friction=".28 .005 .0001", priority="1")
                          if is_target else {"friction": ".5 .005 .0001"})
         for i in range(WALL_SEGMENTS):
