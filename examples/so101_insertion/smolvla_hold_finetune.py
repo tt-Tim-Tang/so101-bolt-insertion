@@ -390,13 +390,15 @@ def run_collect(args) -> None:
         total_episodes=mix_meta.total_episodes,
         total_frames=mix_meta.total_frames,
         fps=FPS,
-        insertion_seconds=args.insertion_seconds,
+        settle_ticks=args.settle_ticks,
+        hold_frames=args.hold_frames,
         mean_new_frames=float(np.mean(lengths)),
         min_new_frames=int(min(lengths)),
         max_new_frames=int(max(lengths)),
         mean_stable_s=float(np.mean(stables)),
         min_stable_s=float(min(stables)),
         max_penetration_mm=float(max(max_pens)),
+        max_abs_roll=float(max(max_rolls)),
         episode_lengths=lengths,
         cases=accepted_cases,
     )
@@ -861,7 +863,8 @@ def main() -> None:
     for k in ("original-dataset", "splits", "historical", "output", "scratch"):
         p_col.add_argument(f"--{k}", type=Path, required=True)
     p_col.add_argument("--episodes", type=int, default=50)
-    p_col.add_argument("--insertion-seconds", type=float, default=2.8)
+    p_col.add_argument("--settle-ticks", type=int, default=10)
+    p_col.add_argument("--hold-frames", type=int, default=35)
 
     p_aud = sub.add_parser("audit")
     for k in ("checkpoint", "original-dataset", "mixed-dataset", "manifest", "output"):
