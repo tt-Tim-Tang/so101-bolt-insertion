@@ -14,7 +14,6 @@ class WideInsertion(Insertion):
         super().__init__(max_steps=20 * control_fps, control_fps=control_fps,
                          target_bore_radius=target_bore_radius, show_target_colliders=True)
         self.walls = np.array([self.model.geom(f"target_wall_{i}").id for i in range(WALL_SEGMENTS)])
-        self.chamfers = np.array([self.model.geom(f"target_chamfer_{i}").id for i in range(WALL_SEGMENTS)])
         self.floor = self.model.geom("target_floor").id
         self.model.opt.timestep = .002
         self.control_fps = control_fps
