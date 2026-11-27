@@ -23,6 +23,32 @@ base_sum="$solref011/baseline-summary.json"
 
 phase=${1:-all}
 
+if [[ "$phase" == "smoke" ]]; then
+  "$py" - <<'PY'
+import numpy as np
+from examples.so101_insertion.smolvla25_data import SmolVLAInsertion, make_case
+from examples.so101_insertion.smolvla_hold_finetune import HoldCollectionEnv, assert_straight_solref011, record_hold_episode
+env = HoldCollectionEnv(penetration_limit_mm=3.0)
+assert_straight_solref011(env)
+case = make_case([5.0, -5.0], np.random.default_rng(42))
+frames, info = record_hold_episode(env, case, 2.8)
+env.close()
+print("LIVE:", len(frames), "success=", info["success"], "stable_s=", info["stable_s"], "max_pen=", round(info["max_penetration_mm"], 3), "slipped=", info["slipped"], "steps=", info["steps"])
+assert info["success"] and info["stable_s"] >= 1.2 and info["max_penetration_mm"] <= 1.5 and info["slipped"] == 0 and len(frames) >= 220
+renv = SmolVLAInsertion(penetration_limit_mm=3.0)
+renv.start(case)
+for f in frames:
+    _, done, to, rinfo = renv.step(f["action"])
+    if done or to:
+        break
+renv.close()
+print("REPLAY:", "success=", rinfo["success"], "steps=", renv.steps, "max_pen=", round(rinfo["max_penetration_mm"], 3), "slipped=", rinfo["slipped"])
+assert rinfo["success"] and not rinfo["slipped"] and not rinfo["penetration_failure"]
+print("SMOKE_OK")
+PY
+  exit 0
+fi
+
 if [[ "$phase" == "collect" || "$phase" == "all" ]]; then
   "$py" -u -m examples.so101_insertion.smolvla_hold_finetune collect \
     --original-dataset "$orig_ds" \
