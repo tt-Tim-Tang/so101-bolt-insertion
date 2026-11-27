@@ -22,6 +22,7 @@ LIMIT_MM = 3.
 GATE_SIZE = 25
 COLLECTION_SIZE = 120
 STATS = "observation.state"
+WRIST_RECENTER_STEP = .003
 
 
 class StallInsertion(EndToEndTelemetry):
@@ -46,7 +47,7 @@ class StallInsertion(EndToEndTelemetry):
                     self.takeover = dict(step=self.steps, first_contact_step=self.first_contact["step"],
                                          xy_mm=float(np.linalg.norm(xy)*1000), tilt_deg=tilt, depth_mm=1000*depth,
                                          advance_mm=1000*(depth-self.depths[0]))
-                    self.teacher = LockedRollTeacher(self)
+                    self.teacher = RecenterRollTeacher(self)
             else:
                 self.depths.clear()
         if self.teacher is None:
@@ -64,7 +65,7 @@ class StallInsertion(EndToEndTelemetry):
         value, done, timeout, info = super().step(action)
         np.testing.assert_allclose(self.data.ctrl,action,atol=2e-7,rtol=0)
         if self.data.ctrl[4] != self.teacher.wrist_roll:
-            raise RuntimeError("Teacher changed the locked wrist_roll command")
+            raise RuntimeError("Applied wrist_roll differs from the teacher command")
         rise = float(self.data.body(self.bolt_id).xpos[2]-self.teacher.start_tip[2])*1000
         self.peak_rise_mm = max(self.peak_rise_mm,rise)
         return value, done or bool(info["slipped"]), timeout or self.teacher.tick >= self.teacher.ticks, info
@@ -85,7 +86,7 @@ def locked_bolt_ik(env, position, axis, wrist_roll):
     jr = np.zeros_like(jp)
     body = int(env.model.site_bodyid[env.grasp_id])
     dofs = env.dofs[:4]
-    axis_weight, posture_weight = .024, .016
+    axis_weight, posture_weight = .024, .004
     reg = posture_weight*np.eye(4)
     damping = .00004*np.eye(4)
     for _ in range(32):
@@ -110,15 +111,16 @@ def locked_bolt_ik(env, position, axis, wrist_roll):
     return best
 
 
-class LockedRollTeacher:
+class RecenterRollTeacher:
     def __init__(self, env):
         tip, axis, _, _, _ = env.bolt_pose()
         self.start_tip, self.start_axis = tip.copy(),axis.copy()
-        self.lift_z = tip[2]+.00065
+        self.lift_z = tip[2]+.003
         self.bottom = env.floor_z+.0005
         self.center = env.model.body(env.target_id).pos[:2].copy()
         self.command = env.data.ctrl.copy()
         self.wrist_roll = float(np.float32(self.command[4]))
+        self.initial_wrist_roll = self.wrist_roll
         self.command[4:] = self.wrist_roll, GRIP
         self.xy_bias = np.zeros(2)
         self.last_delta = np.zeros(4)
@@ -131,6 +133,9 @@ class LockedRollTeacher:
 
     def next_command(self, env):
         if self.tick:
+            step = np.clip(self.wrist_roll,-WRIST_RECENTER_STEP,WRIST_RECENTER_STEP)
+            self.wrist_roll = float(np.float32(self.wrist_roll-step))
+            self.command[4] = self.wrist_roll
             blend = min(self.tick/self.align_ticks,1.)
             blend = blend*blend*(3.-2.*blend)
             up = (1-blend)*self.start_axis+blend*np.array([0.,0.,1.])
@@ -229,7 +234,8 @@ def record_takeover(env,features,row,result):
                    takeover_frames=len(env.frames),first_jump_mrad=env.first_jump_mrad,peak_jump_mrad=env.peak_jump_mrad,
                    peak_rise_mm=env.peak_rise_mm,max_penetration_mm=end["max_penetration_mm"],
                    max_depth_mm=env.max_near_depth_mm,
-                   wrist_roll_rad=env.teacher.wrist_roll if env.teacher else None)
+                   wrist_roll_rad=env.teacher.initial_wrist_roll if env.teacher else None,
+                   final_wrist_roll_rad=env.teacher.wrist_roll if env.teacher else None)
     case = {k:row[k] for k in ("index","seed","case","base")}
     save_json(result,case | dict(takeover=env.takeover,teacher=teacher))
     print("TEACH_GATE",row["index"],env.takeover,teacher,flush=True)
@@ -281,7 +287,11 @@ def build_dataset(args):
                 assert all(len(v)==count for v in arrays.values())
                 assert all(arrays[k].shape==(count,IMAGE_SIZE,IMAGE_SIZE,3) for k in CAMERAS)
                 assert np.allclose(arrays["action"][:,-1],GRIP,rtol=0,atol=1e-8)
-                assert np.all(arrays["action"][:,4]==row["teacher"]["wrist_roll_rad"])
+                wrist_roll = arrays["action"][:,4].astype(float)
+                assert wrist_roll[0]==row["teacher"]["wrist_roll_rad"]
+                assert np.all(wrist_roll*wrist_roll[0]>=0)
+                assert np.all(np.diff(np.abs(wrist_roll))<=0)
+                assert np.all(np.abs(np.diff(wrist_roll))<=WRIST_RECENTER_STEP+2e-7)
                 for i in range(count):
                     dataset.add_frame({k:v[i] for k,v in arrays.items()}|dict(task=TASK))
                 dataset.save_episode()
