@@ -31,10 +31,10 @@ from examples.so101_insertion.smolvla_hold_finetune import HoldCollectionEnv, as
 env = HoldCollectionEnv(penetration_limit_mm=3.0)
 assert_straight_solref011(env)
 case = make_case([5.0, -5.0], np.random.default_rng(42))
-frames, info = record_hold_episode(env, case, 2.8)
+frames, info = record_hold_episode(env, case, 10, 35)
 env.close()
-print("LIVE:", len(frames), "success=", info["success"], "stable_s=", info["stable_s"], "max_pen=", round(info["max_penetration_mm"], 3), "slipped=", info["slipped"], "steps=", info["steps"])
-assert info["success"] and info["stable_s"] >= 1.2 and info["max_penetration_mm"] <= 1.5 and info["slipped"] == 0 and len(frames) >= 220
+print("LIVE:", len(frames), "success=", info["success"], "stable_s=", info["stable_s"], "max_pen=", round(info["max_penetration_mm"], 3), "max_roll=", round(info["max_abs_roll"], 4), "slipped=", info["slipped"])
+assert info["success"] and info["stable_s"] >= 1.2 and info["max_penetration_mm"] <= 1.5 and info["max_abs_roll"] <= 0.15 and info["slipped"] == 0 and len(frames) >= 225
 renv = SmolVLAInsertion(penetration_limit_mm=3.0)
 renv.start(case)
 for f in frames:
@@ -57,7 +57,8 @@ if [[ "$phase" == "collect" || "$phase" == "all" ]]; then
     --output "$out" \
     --scratch "$scratch" \
     --episodes 50 \
-    --insertion-seconds 2.8
+    --settle-ticks 10 \
+    --hold-frames 35
 fi
 
 if [[ "$phase" == "audit" || "$phase" == "all" ]]; then

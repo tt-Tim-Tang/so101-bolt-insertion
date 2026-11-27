@@ -8,8 +8,10 @@ import shutil
 import sys
 import time
 from collections import Counter
+from math import ceil
 from pathlib import Path
 
+import mujoco
 import numpy as np
 
 from .scene import JOINTS, MOUTH_Z
@@ -22,7 +24,6 @@ from .smolvla25_data import (
     create_dataset,
     make_case,
 )
-from .wide_env import expert
 
 
 HOLD_REPO_ID = "local/so101_smolvla25_hold50"
@@ -67,14 +68,162 @@ class HoldCollectionEnv(SmolVLAInsertion):
         return reward, bool(info["penetration_failure"]), timeout, info
 
 
-def record_hold_episode(env: HoldCollectionEnv, case: dict, insertion_seconds: float):
+def locked_bolt_ik(env: SmolVLAInsertion, position: np.ndarray, axis: np.ndarray, wrist_roll: float, grip: float = -0.055) -> np.ndarray:
+    """Solve 4-DOF tip+axis IK with wrist_roll held strictly constant."""
+    tcp = env.data.site("grasp")
+    bolt = env.data.body(env.bolt_id)
+    rot = tcp.xmat.reshape(3, 3)
+    local_tip = rot.T @ (bolt.xpos - tcp.xpos)
+    local_axis = rot.T @ bolt.xmat.reshape(3, 3)[:, 2]
+    posture = env.state().astype(float)
+    posture[4:] = wrist_roll, grip
+    q, best = posture.copy(), posture.copy()
+    best_cost = np.inf
+    jp = np.zeros((3, env.model.nv))
+    jr = np.zeros_like(jp)
+    body = int(env.model.site_bodyid[env.grasp_id])
+    dofs = env.dofs[:4]
+    axis_weight, posture_weight = 0.024, 0.004
+    reg = posture_weight * np.eye(4)
+    damping = 0.00004 * np.eye(4)
+    for _ in range(32):
+        env.ik_data.qpos[env.joints] = q
+        mujoco.mj_forward(env.model, env.ik_data)
+        site = env.ik_data.site("grasp")
+        rot = site.xmat.reshape(3, 3)
+        tip, up = site.xpos + rot @ local_tip, rot @ local_axis
+        error = position - tip
+        anchor = posture[:4] - q[:4]
+        cost = np.sum(error**2) + axis_weight**2 * np.sum((axis - up) ** 2) + posture_weight**2 * np.sum(anchor**2)
+        if cost < best_cost:
+            best_cost, best = cost, q.copy()
+        mujoco.mj_jac(env.model, env.ik_data, jp, jr, tip, body)
+        jac = np.vstack((jp[:, dofs], axis_weight * (np.eye(3) - np.outer(up, up)) @ jr[:, dofs], reg))
+        residual = np.r_[error, axis_weight * np.cross(up, axis), posture_weight * anchor]
+        delta = np.linalg.solve(jac.T @ jac + damping, jac.T @ residual)
+        following = np.clip(q[:4] + np.clip(delta, -0.045, 0.045), env.low[:4], env.high[:4])
+        if np.max(np.abs(following - q[:4])) < 1e-5:
+            break
+        q[:4] = following
+    return best
+
+
+def clean_hold_expert(
+    env: SmolVLAInsertion,
+    case: dict,
+    record=None,
+    *,
+    seat_offset: float = 0.0005,
+    settle_ticks: int = 10,
+    hold_frames: int = 35,
+):
+    """Run the 25 Hz expert with locked wrist_roll during descent and a static bottom hold."""
+    env.start(case)
+    cmd = env.state().astype(float)
+    source, target = [env.model.body(n).pos[:2].copy() for n in ("source", "target")]
+    info = {}
+    scale = 50 / env.control_fps
+
+    def move(phase, point, grip, ticks, up=(0, 0, 1)):
+        nonlocal cmd, info
+        ticks = ceil(ticks / scale)
+        env.phase = phase
+        try:
+            end = env.inverse_kinematics(point, cmd, up)
+        except RuntimeError:
+            if np.array_equal(up, (0, 0, 1)):
+                raise
+            end = env.inverse_kinematics(point, cmd)
+        end[-1] = grip
+        for t in range(1, ticks + 1):
+            f = t / ticks
+            action = (cmd + (end - cmd) * (f * f * (3 - 2 * f))).astype(np.float32)
+            if record:
+                record(action)
+            _, done, timeout, info = env.step(action)
+            if done or timeout:
+                return True
+        cmd = end.copy()
+        return False
+
+    for phase, z, grip, ticks in (
+        ("over_source", 0.105, 0.52, 44),
+        ("lower", 0.057, 0.52, 50),
+        ("close", 0.057, -0.055, 36),
+        ("lift", 0.107, -0.055, 64),
+    ):
+        if move(phase, [*source, z], grip, ticks):
+            return info, float(np.abs(cmd[4]))
+    if not env.pick:
+        return dict(info, reason="pickup"), float(np.abs(cmd[4]))
+
+    def tip_offset():
+        return env.data.body("bolt").xpos - env.data.site("grasp").xpos
+
+    if move("transfer", np.r_[target, MOUTH_Z + 0.030] - tip_offset(), -0.055, 64):
+        return info, float(np.abs(cmd[4]))
+
+    locked_roll = float(cmd[4])
+    max_abs_roll = abs(locked_roll)
+    xy_correction = np.zeros(2)
+
+    def track_tip(z, axis=(0.0, 0.0, 1.0)):
+        nonlocal cmd, info, max_abs_roll
+        tip = env.data.body("bolt").xpos
+        xy_correction[:] = np.clip(xy_correction + np.clip(0.2 * (target - tip[:2]), -0.0001, 0.0001), -0.002, 0.002)
+        point = np.r_[target + xy_correction, z]
+        target_q = locked_bolt_ik(env, point, np.asarray(axis), locked_roll)
+        cmd[:4] += np.clip(target_q[:4] - cmd[:4], -0.025 * scale, 0.025 * scale)
+        cmd[4] = locked_roll
+        cmd[-1] = -0.055
+        max_abs_roll = max(max_abs_roll, abs(float(cmd[4])))
+        action = cmd.astype(np.float32)
+        if record:
+            record(action)
+        _, done, timeout, info = env.step(action)
+        return done or timeout
+
+    env.phase = "air_align"
+    start_z = float(env.data.body("bolt").xpos[2])
+    start_axis = env.data.body("bolt").xmat.reshape(3, 3)[:, 2].copy()
+    align_ticks = ceil(50 / scale)
+    for tick in range(1, align_ticks + 1):
+        f = tick / align_ticks
+        blend = f * f * (3 - 2 * f)
+        z = start_z + (MOUTH_Z + 0.005 - start_z) * blend
+        axis = (1 - blend) * start_axis + blend * np.array([0.0, 0.0, 1.0])
+        if track_tip(z, axis / np.linalg.norm(axis)):
+            return info, max_abs_roll
+
+    descent_ticks = ceil(65 / scale)
+    for tick in range(1, descent_ticks + settle_ticks + 1):
+        env.phase = "insert" if tick <= descent_ticks else "settle"
+        z = MOUTH_Z + 0.005 + (env.floor_z + seat_offset - MOUTH_Z - 0.005) * min(tick / descent_ticks, 1.0)
+        if track_tip(z):
+            return info, max_abs_roll
+
+    env.phase = "hold"
+    hold_cmd = cmd.astype(np.float32).copy()
+    for _ in range(hold_frames):
+        if record:
+            record(hold_cmd)
+        _, done, timeout, info = env.step(hold_cmd)
+        if done or timeout:
+            return info, max_abs_roll
+    return dict(info, reason=f"hold_{hold_frames}_complete"), max_abs_roll
+
+
+def record_hold_episode(env: HoldCollectionEnv, case: dict, settle_ticks: int, hold_frames: int):
     frames = []
 
     def record(action):
         frames.append(dict(**env.observation(), action=np.clip(action, env.low, env.high).astype(np.float32)))
 
+    max_abs_roll = 0.0
     try:
-        info = expert(env, case, record=record, insertion_seconds=insertion_seconds)
+        info, max_abs_roll = clean_hold_expert(
+            env, case, record=record, settle_ticks=settle_ticks, hold_frames=hold_frames
+        )
     except RuntimeError as exc:
         if not str(exc).startswith(("Held-bolt IK did not converge", "Unreachable grasp waypoint")):
             raise
@@ -83,7 +232,7 @@ def record_hold_episode(env: HoldCollectionEnv, case: dict, insertion_seconds: f
     elapsed = env.data.time - env.start_time
     finite = bool(np.isfinite(env.data.qpos).all() and np.isfinite(env.data.qvel).all())
     clock_ok = bool(np.isclose(elapsed, env.steps / FPS, atol=1e-9))
-    info = dict(info, steps=env.steps, finite=finite, clock_ok=clock_ok)
+    info = dict(info, steps=env.steps, finite=finite, clock_ok=clock_ok, max_abs_roll=max_abs_roll)
     return frames, info
 
 
@@ -142,6 +291,7 @@ def run_collect(args) -> None:
     lengths = []
     stables = []
     max_pens = []
+    max_rolls = []
     candidate_idx = 0
     try:
         with (args.output / "collection.jsonl").open("w", encoding="utf-8", buffering=1) as log:
@@ -151,7 +301,7 @@ def run_collect(args) -> None:
                 target = candidates[candidate_idx]
                 candidate_idx += 1
                 case = make_case(target, rng)
-                frames, info = record_hold_episode(env, case, args.insertion_seconds)
+                frames, info = record_hold_episode(env, case, args.settle_ticks, args.hold_frames)
                 ok = (
                     bool(info["success"])
                     and bool(info["clock_ok"])
@@ -161,7 +311,8 @@ def run_collect(args) -> None:
                     and info["opened_early"] == 0
                     and info["stable_s"] >= 1.2
                     and info["max_penetration_mm"] <= 1.5
-                    and len(frames) >= 220
+                    and info["max_abs_roll"] <= 0.15
+                    and len(frames) >= 225
                 )
                 replay_ok = None
                 if ok and len(accepted_cases) < 3:
@@ -185,6 +336,7 @@ def run_collect(args) -> None:
                             frames=len(frames),
                             stable_s=info["stable_s"],
                             max_penetration_mm=info["max_penetration_mm"],
+                            max_abs_roll=info["max_abs_roll"],
                             replay_ok=replay_ok,
                             target=target,
                         )
@@ -200,9 +352,11 @@ def run_collect(args) -> None:
                 lengths.append(len(frames))
                 stables.append(float(info["stable_s"]))
                 max_pens.append(float(info["max_penetration_mm"]))
+                max_rolls.append(float(info["max_abs_roll"]))
                 print(
                     f"HOLD_COLLECT {len(accepted_cases)}/{args.episodes} frames={len(frames)} "
-                    f"stable_s={info['stable_s']:.2f} max_pen={info['max_penetration_mm']:.2f}",
+                    f"stable_s={info['stable_s']:.2f} max_pen={info['max_penetration_mm']:.2f} "
+                    f"max_roll={info['max_abs_roll']:.3f}",
                     flush=True,
                 )
     finally:
