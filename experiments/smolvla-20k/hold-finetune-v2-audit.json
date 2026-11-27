@@ -1,0 +1,105 @@
+{
+  "checkpoint": "/root/gpufree-data/so101-insertion/outputs/smolvla25-r18-smoke/increment-20k/training/checkpoints/020000/pretrained_model",
+  "seed": 1000,
+  "batch": 32,
+  "optimizer_updates": 0,
+  "original_input_max_diff": {
+    "action": 0.0,
+    "action_is_pad": 0.0,
+    "observation.state": 0.0,
+    "observation.images.camera1": 0.0,
+    "observation.images.camera2": 0.0,
+    "observation.language.tokens": 0.0,
+    "observation.language.attention_mask": 0.0
+  },
+  "original": {
+    "loss": 0.00222346605733037,
+    "axes": {
+      "shoulder_pan": 0.0005734148435294628,
+      "shoulder_lift": 0.0025648719165474176,
+      "elbow_flex": 0.0032046623528003693,
+      "wrist_flex": 0.0035631407517939806,
+      "wrist_roll": 0.0030016296077519655,
+      "gripper": 0.00043307870510034263
+    },
+    "valid_steps": 758,
+    "samples": 32,
+    "worst_sample": {
+      "episode": 0,
+      "frame": 21,
+      "loss": 0.032649144530296326
+    }
+  },
+  "original_from_mixed": {
+    "loss": 0.00222346605733037,
+    "axes": {
+      "shoulder_pan": 0.0005734148435294628,
+      "shoulder_lift": 0.0025648719165474176,
+      "elbow_flex": 0.0032046623528003693,
+      "wrist_flex": 0.0035631407517939806,
+      "wrist_roll": 0.0030016296077519655,
+      "gripper": 0.00043307870510034263
+    },
+    "valid_steps": 758,
+    "samples": 32,
+    "worst_sample": {
+      "episode": 0,
+      "frame": 21,
+      "loss": 0.032649144530296326
+    }
+  },
+  "val_prefix_0_190": {
+    "loss": 0.03025497868657112,
+    "axes": {
+      "shoulder_pan": 0.0003523688646964729,
+      "shoulder_lift": 0.002331324154511094,
+      "elbow_flex": 0.000919270736631006,
+      "wrist_flex": 0.0005021742545068264,
+      "wrist_roll": 0.17707060277462006,
+      "gripper": 0.0003541315090842545
+    },
+    "valid_steps": 717,
+    "samples": 32,
+    "worst_sample": {
+      "episode": 9,
+      "frame": 171,
+      "loss": 0.6100544929504395
+    }
+  },
+  "hold50_prefix_0_190": {
+    "loss": 0.036238353699445724,
+    "axes": {
+      "shoulder_pan": 0.0007453612051904202,
+      "shoulder_lift": 0.0051845405250787735,
+      "elbow_flex": 0.025435375049710274,
+      "wrist_flex": 0.01522057969123125,
+      "wrist_roll": 0.17005164921283722,
+      "gripper": 0.0007925989921204746
+    },
+    "valid_steps": 800,
+    "samples": 32,
+    "worst_sample": {
+      "episode": 156,
+      "frame": 186,
+      "loss": 0.5194330811500549
+    }
+  },
+  "hold50_tail_191_216": {
+    "loss": 1.9055334329605103,
+    "axes": {
+      "shoulder_pan": 0.0672324001789093,
+      "shoulder_lift": 0.15372397005558014,
+      "elbow_flex": 0.2854793071746826,
+      "wrist_flex": 0.2997496426105499,
+      "wrist_roll": 10.617012977600098,
+      "gripper": 0.01000275369733572
+    },
+    "valid_steps": 405,
+    "samples": 32,
+    "worst_sample": {
+      "episode": 177,
+      "frame": 195,
+      "loss": 11.284233093261719
+    }
+  }
+}

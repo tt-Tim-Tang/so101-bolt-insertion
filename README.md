@@ -64,6 +64,8 @@ git apply patches/smolvla-padding-velocity.patch
 | --- | --- | ---: | ---: | ---: | --- |
 | **对齐直壁基准**（`solref=0.011`, `friction=0.28`, `0 chamfer`） | **修复版 SmolVLA 20k（首测）** | **25/30 (83.3%)** | **0** | 3 / 2 | [straight-solref011-run1.json](experiments/smolvla-20k/straight-solref011-run1.json) |
 | **对齐直壁基准**（`solref=0.011`, `friction=0.28`, `0 chamfer`） | **修复版 SmolVLA 20k（同种子复测）** | **27/30 (90.0%)** | **0** | 1 / 2 | [straight-solref011-run2-force-gate.json](experiments/smolvla-20k/straight-solref011-run2-force-gate.json) |
+| **对齐直壁基准**（`solref=0.011`, `friction=0.28`, `0 chamfer`） | **孔底保持补训 v2（5 轴同源 22k）** | **24/30 (80.0%)** | **0** | 3 / 3 | [hold-finetune-v2-comparison.json](experiments/smolvla-20k/hold-finetune-v2-comparison.json) |
+| **对齐直壁基准**（`solref=0.011`, `friction=0.28`, `0 chamfer`） | 孔底保持补训 v1（4 轴锁腕 23k） | 22/30 (73.3%) | 0 | 2 / 6 | [hold-finetune-v1-comparison.json](experiments/smolvla-20k/hold-finetune-v1-comparison.json) |
 | 早期过硬壁面基准（`solref=0.006`, `friction=0.50`） | 修复版 SmolVLA 20k（首测 / 复测） | 21/30 · 23/30 | 0 · 1 | 9 · 7 | [end-to-end-30.json](experiments/smolvla-20k/end-to-end-30.json) · [repeat](experiments/smolvla-20k/end-to-end-30-repeat.json) |
 | 早期过硬壁面基准（`solref=0.006`, `friction=0.50`） | 全动作 BC Actor（6 mm 接管） | 21/30 | 0 | 9 | [stage-a-bc.json](experiments/smolvla-20k/stage-a-bc.json) |
 | 早期过硬壁面基准（`solref=0.006`, `friction=0.50`） | 在线 RL-Token（10k 两次回放） | 11/30 · 12/30 | 0 · 1 | 19 · 17 | [online-rl.json](experiments/smolvla-20k/online-rl.json) |
@@ -80,7 +82,8 @@ git apply patches/smolvla-padding-velocity.patch
 | **在线 RL-Token** | 留出泛化低于 BC 基线 | 固定监控孔 `8/10 → 9/10`，但 30 留出孔跌至 `11–12/30`（接管跳变 P95 `26.1 mrad`，未见孔破坏对齐）[online-rl.json](experiments/smolvla-20k/online-rl.json) |
 | **DAgger 续训（25k）** | 5 轴零空间漂移污染底座 | 冻结 `20k` 拆算 flow loss：原数据 `0.000331` vs 老师数据 `23.58`，其中 `wrist_roll` 一轴占 **81.1%** [dagger-frozen-loss.json](experiments/smolvla-20k/dagger-frozen-loss.json) |
 | **力反馈“卸力停”门控** | 第 0 步零训练直接证伪 | 3 种卸力动作 Oracle 触发 **`0/14`** 成功；舵机力矩 AUROC 仅 **`0.729`**（与空中搬运严重重叠）[straight-solref011-run2-force-gate.json](experiments/smolvla-20k/straight-solref011-run2-force-gate.json) |
-| **剩余 3–5 局边界** | 非对齐失败，系长保持与裁判边界 | `30/30` 全已进洞 `29.5–32.4 mm`；150 条示教均在 ~191 步刚满 200 ms 截断，且 500 Hz 裁判单帧超 `gap > 2 mm` 即清零计时 |
+| **孔底保持帧补采续训（v1 / v2）** | 救回失败孔但整体互换，锁死平台在 `24–25/30` | v1（4 轴锁腕）冻结 `wrist_roll` Loss `4.51`，`25→1→22/30`（救回 `[2,5,12,13,28]` 但另掉 8 孔）[v1](experiments/smolvla-20k/hold-finetune-v1-comparison.json)；v2（5 轴同源前缀 `wrist_roll` `0.170` vs 验证集 `0.177`）全程 `0` 滑落，22k 达 `24/30`（救回 `[2,12,13]`，另 4 孔擦线轮换）[v2](experiments/smolvla-20k/hold-finetune-v2-comparison.json) |
+| **剩余 3–5 局硬件边界** | 非数据或代码缺陷，系 5-DoF 无力控硬件上限 | `30/30` 已进洞 `29.5–32.4 mm`；但视觉误差（`1.20 mm`）> 单边间隙（`0.7 mm`）、无力觉且舵机硬位置伺服（`kp=998.22`）不让步、5 轴缺侧向摆正自由度、铰链夹爪受力慢挤上滑（`~2 mm/s`），故在 `80%–90%` 处形成随机孔位轮换平台 |
 
 ---
 
@@ -97,6 +100,7 @@ git apply patches/smolvla-padding-velocity.patch
 | [examples/so101_insertion/smolvla_padding_e2e30.py](examples/so101_insertion/smolvla_padding_e2e30.py) | 开启 `corrected=True` 的 30 留出孔端到端评估与遥测脚本 |
 | [examples/so101_insertion/smolvla_dagger_loss_audit.py](examples/so101_insertion/smolvla_dagger_loss_audit.py) | 冻结权重逐轴 flow loss 诊断（定位 `wrist_roll` 81.1%） |
 | [examples/so101_insertion/smolvla_force_gate_step0.py](examples/so101_insertion/smolvla_force_gate_step0.py) | 第 0 步 Oracle 卸力上限与舵机信号 AUROC 诊断脚本 |
+| [examples/so101_insertion/smolvla_hold_finetune.py](examples/so101_insertion/smolvla_hold_finetune.py) | 孔底 25 帧静态保持补采、前/尾段 6 轴 Loss 体检、续训与 30 孔对照脚本 |
 | [docs/engineering-notes.md](docs/engineering-notes.md) | `#5335` 推导、物理对齐与全部排查记录 |
 | [README-pi05-50hz.md](README-pi05-50hz.md) | 早期 π0.5 / 50 Hz 探索归档 |
 

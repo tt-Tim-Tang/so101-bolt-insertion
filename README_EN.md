@@ -63,6 +63,8 @@ Pass `correct_padding_velocity=True` to `select_action` / `predict_action_chunk`
 | --- | --- | ---: | ---: | ---: | --- |
 | **Aligned Straight Wall** (`solref=0.011`, `friction=0.28`, `0 chamfer`) | **Patched SmolVLA 20k (Run 1)** | **25/30 (83.3%)** | **0** | 3 / 2 | [straight-solref011-run1.json](experiments/smolvla-20k/straight-solref011-run1.json) |
 | **Aligned Straight Wall** (`solref=0.011`, `friction=0.28`, `0 chamfer`) | **Patched SmolVLA 20k (Run 2, same seeds)** | **27/30 (90.0%)** | **0** | 1 / 2 | [straight-solref011-run2-force-gate.json](experiments/smolvla-20k/straight-solref011-run2-force-gate.json) |
+| **Aligned Straight Wall** (`solref=0.011`, `friction=0.28`, `0 chamfer`) | **Hold-Extension Fine-Tune v2 (5-DoF matched, 22k)** | **24/30 (80.0%)** | **0** | 3 / 3 | [hold-finetune-v2-comparison.json](experiments/smolvla-20k/hold-finetune-v2-comparison.json) |
+| **Aligned Straight Wall** (`solref=0.011`, `friction=0.28`, `0 chamfer`) | Hold-Extension Fine-Tune v1 (4-DoF locked roll, 23k) | 22/30 (73.3%) | 0 | 2 / 6 | [hold-finetune-v1-comparison.json](experiments/smolvla-20k/hold-finetune-v1-comparison.json) |
 | Legacy Stiff Wall (`solref=0.006`, `friction=0.50`) | Patched SmolVLA 20k (Run 1 / Repeat) | 21/30 · 23/30 | 0 · 1 | 9 · 7 | [end-to-end-30.json](experiments/smolvla-20k/end-to-end-30.json) · [repeat](experiments/smolvla-20k/end-to-end-30-repeat.json) |
 | Legacy Stiff Wall (`solref=0.006`, `friction=0.50`) | Full-Action BC Actor (6 mm handoff) | 21/30 | 0 | 9 | [stage-a-bc.json](experiments/smolvla-20k/stage-a-bc.json) |
 | Legacy Stiff Wall (`solref=0.006`, `friction=0.50`) | Online RL-Token (10k, two rollouts) | 11/30 · 12/30 | 0 · 1 | 19 · 17 | [online-rl.json](experiments/smolvla-20k/online-rl.json) |
@@ -79,7 +81,8 @@ Every post-training branch was audited with zero-training gates or frozen-weight
 | **Online RL-Token** | Regressed on unseen holes | Monitored holes rose `8/10 → 9/10`, but 30 unseen holes dropped to `11–12/30` (`26.1 mrad` P95 takeover jump disturbed clean arrivals) [online-rl.json](experiments/smolvla-20k/online-rl.json) |
 | **DAgger 25k** | 5-DoF IK null-space drift | Frozen 20k flow loss: `0.000331` (original) vs `23.58` (teacher); `wrist_roll` alone accounted for **81.1%** of teacher batch loss [dagger-frozen-loss.json](experiments/smolvla-20k/dagger-frozen-loss.json) |
 | **Force-Feedback Unloading Gate** | Falsified at Step 0 (0 training) | Oracle unloading triggers achieved **`0/14`** insertions (max streak `100 ms` < `200 ms`); actuator torque AUROC was **`0.729`** [straight-solref011-run2-force-gate.json](experiments/smolvla-20k/straight-solref011-run2-force-gate.json) |
-| **Remaining 3–5/30 Failures** | Horizon & seating boundary | `30/30` reach `29.5–32.4 mm`; demos truncate near ~191 steps right at `200 ms`, while any single 2 ms tick with `gap > 2.0 mm` resets the streak |
+| **Hold-Extension Continuation (v1 / v2)** | Recovers old misses but trades holes (`24–25/30`) | v1 (4-DoF locked roll) caused frozen `wrist_roll` shock (`4.51`) and dipped `25→1→22/30` (rescued `[2,5,12,13,28]`, lost 8)[v1](experiments/smolvla-20k/hold-finetune-v1-comparison.json); v2 (5-DoF matched prefix `wrist_roll 0.170` vs val `0.177`) held `0` slips throughout and reached `24/30` at 22k (rescued `[2,12,13]`, rotated 4 marginal holes)[v2](experiments/smolvla-20k/hold-finetune-v2-comparison.json) |
+| **Remaining Hardware Ceiling (3–5/30)** | Physical SO-101 5-DoF vision-only limit | `30/30` enter `29.5–32.4 mm`; vision error (`1.20 mm`) > radial clearance (`0.7 mm`), zero force sensing, rigid position servos (`kp=998.22`), missing lateral wrist-tilt DoF, and hinged-jaw upward creep (`~2 mm/s`) create an `80%–90%` plateau where marginal holes rotate rather than vanish |
 
 ---
 
@@ -96,6 +99,7 @@ While `examples/so101_insertion/` preserves the full exploration history, the ma
 | [examples/so101_insertion/smolvla_padding_e2e30.py](examples/so101_insertion/smolvla_padding_e2e30.py) | Patched (`corrected=True`) 30-hole end-to-end evaluation & telemetry |
 | [examples/so101_insertion/smolvla_dagger_loss_audit.py](examples/so101_insertion/smolvla_dagger_loss_audit.py) | Frozen-weight per-axis flow loss diagnostic (`wrist_roll` 81.1% attribution) |
 | [examples/so101_insertion/smolvla_force_gate_step0.py](examples/so101_insertion/smolvla_force_gate_step0.py) | Step-0 oracle unloading & torque AUROC diagnostic |
+| [examples/so101_insertion/smolvla_hold_finetune.py](examples/so101_insertion/smolvla_hold_finetune.py) | 25-frame static hold collection, split prefix/tail 6-DoF loss audit, continuation & 30-hole eval |
 | [README-pi05-50hz.md](README-pi05-50hz.md) | Earlier π0.5 / 50 Hz exploration archive |
 
 ---

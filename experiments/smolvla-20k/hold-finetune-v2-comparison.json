@@ -1,0 +1,108 @@
+{
+  "baseline_20k": {
+    "insertions": 25,
+    "slips": 0,
+    "penetration": 2,
+    "timeouts": 3,
+    "wrist_p95_mm": 4.794287599443966
+  },
+  "candidates": [
+    {
+      "label": "020500",
+      "insertions": 10,
+      "slips": 0,
+      "penetration": 11,
+      "timeouts": 9,
+      "wrist_p95_mm": 4.539887473479104,
+      "median_max_penetration_mm": 2.827529838718527,
+      "recovered": [],
+      "regressed": [
+        1,
+        4,
+        6,
+        7,
+        9,
+        10,
+        14,
+        15,
+        16,
+        18,
+        19,
+        24,
+        25,
+        26,
+        29
+      ]
+    },
+    {
+      "label": "021000",
+      "insertions": 13,
+      "slips": 0,
+      "penetration": 10,
+      "timeouts": 7,
+      "wrist_p95_mm": 4.575562336139845,
+      "median_max_penetration_mm": 2.5661834047274796,
+      "recovered": [
+        2,
+        5
+      ],
+      "regressed": [
+        1,
+        6,
+        7,
+        8,
+        9,
+        10,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        25,
+        27
+      ]
+    },
+    {
+      "label": "022000",
+      "insertions": 24,
+      "slips": 0,
+      "penetration": 3,
+      "timeouts": 3,
+      "wrist_p95_mm": 4.719893475515782,
+      "median_max_penetration_mm": 1.4014667145664006,
+      "recovered": [
+        2,
+        12,
+        13
+      ],
+      "regressed": [
+        1,
+        9,
+        19,
+        22
+      ]
+    }
+  ],
+  "best": {
+    "label": "022000",
+    "insertions": 24,
+    "slips": 0,
+    "penetration": 3,
+    "timeouts": 3,
+    "wrist_p95_mm": 4.719893475515782,
+    "median_max_penetration_mm": 1.4014667145664006,
+    "recovered": [
+      2,
+      12,
+      13
+    ],
+    "regressed": [
+      1,
+      9,
+      19,
+      22
+    ]
+  },
+  "persisted_best_checkpoint": null
+}
