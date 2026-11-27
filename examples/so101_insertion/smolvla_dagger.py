@@ -9,11 +9,10 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
-from examples.so101_insertion.scene import IMAGE_SIZE, SHAFT_RADIUS, TASK
+from examples.so101_insertion.scene import IMAGE_SIZE, MOUTH_Z, TASK
 from examples.so101_insertion.smolvla25_data import CAMERAS, FPS, MERGED_REPO_ID, create_dataset, make_case
 from examples.so101_insertion.smolvla_padding_e2e30 import EndToEndTelemetry, failure_mode, replay
-from examples.so101_insertion.smolvla_rlt_stage2 import GRIP, STATE, FrozenSmolVLA
-from examples.so101_insertion.smolvla_rlt_v3 import COUNTERS
+from examples.so101_insertion.smolvla_rlt_stage2 import GRIP, FrozenSmolVLA
 from examples.so101_insertion.smolvla_rlt_v3_pool import fixed_cases, save_json
 
 
@@ -21,151 +20,130 @@ DAGGER_ID = "local/so101_smolvla25_dagger"
 MIXED_ID = "local/so101_smolvla25_dagger_mixed"
 LIMIT_MM = 3.
 GATE_SIZE = 25
-COLLECTION_SIZE = 120
 STATS = "observation.state"
 
 
-class ScreenInsertion(EndToEndTelemetry):
+class StallInsertion(EndToEndTelemetry):
+    """Hand control to the teacher at a stall in the same physics rollout."""
+
     def start(self, case):
         super().start(case)
         self.depths = deque(maxlen=16)
+        self.teacher = None
         self.takeover = None
-        self.teaching = False
+        self.frames = []
+        self.peak_rise_mm = 0.
+        self.first_jump_mrad = 0.
+        self.peak_jump_mrad = 0.
 
     def step(self, action):
-        if not self.teaching and self.takeover is None and self.pick and self.pickup_state()[-1]:
-            _, _, xy, depth, tilt = self.bolt_pose()
-            radial = np.linalg.norm(xy)*1000
-            reason = None
-            if self.first_contact is None:
-                if -6. <= depth*1000 < 0 and radial <= 15. and (radial > 1.5 or tilt > 6.):
-                    reason = "approach"
-            else:
+        if self.teacher is None:
+            if self.first_contact is not None and self.pick and self.pickup_state()[-1]:
+                _, _, xy, depth, tilt = self.bolt_pose()
                 self.depths.append(depth)
-                if len(self.depths)==16 and depth-self.depths[0]<.0006 and self.seated_ticks==0:
-                    reason = "stall"
-            if reason is not None:
-                physics = np.empty(mujoco.mj_stateSize(self.model, STATE))
-                mujoco.mj_getState(self.model,self.data,physics,STATE)
-                self.takeover = dict(physics=physics,counters={k:getattr(self,k) for k in COUNTERS},
-                                     reason=reason,contact=self.first_contact,step=self.steps,
-                                     xy_mm=float(radial),tilt_deg=tilt,depth_mm=1000*depth)
-        return super().step(action)
+                if len(self.depths) == 16 and depth-self.depths[0] < .0006 and self.seated_ticks == 0:
+                    self.takeover = dict(step=self.steps, first_contact_step=self.first_contact["step"],
+                                         xy_mm=float(np.linalg.norm(xy)*1000), tilt_deg=tilt, depth_mm=1000*depth,
+                                         advance_mm=1000*(depth-self.depths[0]))
+                    self.teacher = LockedRollTeacher(self)
+            else:
+                self.depths.clear()
+        if self.teacher is None:
+            return super().step(action)
 
-    def restore(self, case, saved):
-        self.start(case)
-        mujoco.mj_setState(self.model,self.data,saved["physics"],STATE)
-        mujoco.mj_forward(self.model,self.data)
-        mujoco.mj_setState(self.model,self.data,saved["physics"],STATE)
-        for key,value in saved["counters"].items():
-            setattr(self,key,value)
-        self.first_contact = saved["contact"]
-        self.teaching = True
+        action = self.teacher.next_command(self)
+        observation = self.observation()
+        if observation["task"] != TASK or any(observation[k].shape != (IMAGE_SIZE,IMAGE_SIZE,3) for k in CAMERAS):
+            raise RuntimeError("DAgger recording does not match the original observation schema")
+        self.frames.append(observation | dict(action=action.copy()))
+        jump = 1000*float(np.abs(action-self.data.ctrl).max())
+        if len(self.frames) == 1:
+            self.first_jump_mrad = jump
+        self.peak_jump_mrad = max(self.peak_jump_mrad,jump)
+        value, done, timeout, info = super().step(action)
+        np.testing.assert_allclose(self.data.ctrl,action,atol=2e-7,rtol=0)
+        if self.data.ctrl[4] != self.teacher.wrist_roll:
+            raise RuntimeError("Teacher changed the locked wrist_roll command")
+        rise = float(self.data.body(self.bolt_id).xpos[2]-self.teacher.start_tip[2])*1000
+        self.peak_rise_mm = max(self.peak_rise_mm,rise)
+        return value, done or bool(info["slipped"]), timeout, info
 
 
-def smoothstep(value):
-    x = np.clip(value,0.,1.)
-    return x*x*(3.-2.*x)
-
-
-def teach(env,case,saved,*,record,unload_mm=1.2,align_ticks=26,descent_mm=.55,stall_feedback=False):
-    if not saved:
-        return dict(success=False,slipped=0,reason="no_eligible_takeover",frames=0), []
-    env.restore(case,saved)
-    start_tip, start_axis, _, _, _ = env.bolt_pose()
-    start_tip,start_axis = start_tip.copy(), start_axis.copy()
-    initial_command = env.data.ctrl.copy()
-    command = initial_command.copy()
-    command[-1] = GRIP
-    center = env.model.body(env.target_id).pos[:2].copy()
-    up = np.array([0.,0.,1.])
-    stall = saved["reason"]=="stall"
-    feedback = stall and stall_feedback
-    if stall_feedback and not stall:
-        align_ticks,descent_mm = 26,.55
-    # Align at the approach height or unload slightly from the captured stall.
-    top = start_tip[2]+(.001*unload_mm if stall else 0.)
-    bottom = env.floor_z+.0006
-    descent_ticks = int(np.ceil(1.5*max(0.,top-bottom)/(.001*descent_mm)))
-    xy_bias = np.zeros(2)
-    z_bias = 0.
-    limit = np.array([.010,.012,.012,.014,.019])
-    if feedback:
-        limit *= .44
-    difference = np.zeros(5)
-    frames, info = [], {}
-    first_jump = arm_jump = peak_jump = rise_mm = 0.
-    ik_failures = 0
-    for i in range(min(env.max_steps-env.steps,align_ticks+descent_ticks+75)):
-        if i:
-            alpha = float(smoothstep(i/align_ticks))
-            end = float(smoothstep((i-align_ticks)/max(1,descent_ticks)))
-            tip, axis, _, _, _ = env.bolt_pose()
-            wanted_xy = (1-alpha)*start_tip[:2]+alpha*center
-            xy_bias = np.clip(xy_bias+np.clip(.13*(wanted_xy-tip[:2]),-.00008,.00008),-.0014,.0014)
-            wanted_z = (1-end)*((1-alpha)*start_tip[2]+alpha*top)+end*bottom
-            wanted_axis = (1-alpha)*start_axis+alpha*up
-            wanted_axis /= np.linalg.norm(wanted_axis)
-            if feedback:
-                if i<=align_ticks and tip[2]-start_tip[2]>.001:
-                    wanted_z = min(wanted_z,start_tip[2]+.00045)
-                if i>align_ticks:
-                    z_bias = np.clip(z_bias+np.clip(.12*(wanted_z-tip[2]),-.00008,.00006),-.0019,.0002)
-                    wanted_z += z_bias
-            goal = np.r_[wanted_xy+xy_bias,wanted_z]
-            qpos = env.data.qpos[env.joints].copy()
-            try:
-                next_q = env.bolt_ik(goal,wanted_axis,qpos)
-            except RuntimeError as error:
-                if not str(error).startswith("Held-bolt IK did not converge"):
-                    raise
-                ik_failures += 1
-                # Keep the local step small when a fully vertical IK target is infeasible.
-                eased_axis = wanted_axis+axis
-                eased_axis /= np.linalg.norm(eased_axis)
-                try:
-                    next_q = env.bolt_ik(.55*goal+.45*tip,eased_axis,qpos)
-                except RuntimeError as fallback_error:
-                    if not str(fallback_error).startswith("Held-bolt IK did not converge"):
-                        raise
-                    next_q = command
-            wanted = np.clip(next_q[:5]-command[:5],-limit,limit)
-            difference += np.clip(wanted-difference,-limit*.4,limit*.4)
-            command[:5] += difference
-        command = np.clip(command,env.low,env.high)
-        prev = env.data.ctrl.copy()
-        # Match smolvla25_data.record_trial: observation before executing a clipped target.
-        action = command.astype(np.float32)
-        if record:
-            observation = env.observation()
-            if observation["task"]!=TASK or any(observation[k].shape!=(IMAGE_SIZE,IMAGE_SIZE,3) for k in CAMERAS):
-                raise RuntimeError("DAgger recording does not match the original observation schema")
-            frames.append(observation|dict(action=action.copy()))
-        _, done, timeout, info = env.step(action)
-        np.testing.assert_allclose(env.data.ctrl,action,atol=2e-7,rtol=0)
-        step_jump = 1000*np.abs(env.data.ctrl-prev)
-        peak_jump = max(peak_jump,float(step_jump.max()))
-        if i==0:
-            first_jump,arm_jump = float(step_jump.max()),float(step_jump[:5].max())
-        if i<=align_ticks and stall:
-            rise_mm = max(rise_mm,1000*float(env.data.body(env.bolt_id).xpos[2]-start_tip[2]))
-        if done or timeout or info["slipped"]:
+def locked_bolt_ik(env, position, axis, wrist_roll):
+    """Fit the held tip and softly align its axis using the first four joints."""
+    tcp = env.data.site("grasp")
+    bolt = env.data.body(env.bolt_id)
+    rot = tcp.xmat.reshape(3,3)
+    local_tip = rot.T@(bolt.xpos-tcp.xpos)
+    local_axis = rot.T@bolt.xmat.reshape(3,3)[:,2]
+    posture = env.state().astype(float)
+    posture[4:] = wrist_roll, GRIP
+    q, best = posture.copy(), posture.copy()
+    best_cost = np.inf
+    jp = np.zeros((3,env.model.nv))
+    jr = np.zeros_like(jp)
+    body = int(env.model.site_bodyid[env.grasp_id])
+    dofs = env.dofs[:4]
+    axis_weight, posture_weight = .024, .016
+    reg = posture_weight*np.eye(4)
+    damping = .00004*np.eye(4)
+    for _ in range(32):
+        env.ik_data.qpos[env.joints] = q
+        mujoco.mj_forward(env.model,env.ik_data)
+        site = env.ik_data.site("grasp")
+        rot = site.xmat.reshape(3,3)
+        tip, up = site.xpos+rot@local_tip, rot@local_axis
+        error = position-tip
+        anchor = posture[:4]-q[:4]
+        cost = np.sum(error**2)+axis_weight**2*np.sum((axis-up)**2)+posture_weight**2*np.sum(anchor**2)
+        if cost < best_cost:
+            best_cost, best = cost, q.copy()
+        mujoco.mj_jac(env.model,env.ik_data,jp,jr,tip,body)
+        jac = np.vstack((jp[:,dofs],axis_weight*(np.eye(3)-np.outer(up,up))@jr[:,dofs],reg))
+        residual = np.r_[error,axis_weight*np.cross(up,axis),posture_weight*anchor]
+        delta = np.linalg.solve(jac.T@jac+damping,jac.T@residual)
+        following = np.clip(q[:4]+np.clip(delta,-.045,.045),env.low[:4],env.high[:4])
+        if np.max(np.abs(following-q[:4])) < 1e-5:
             break
-    success = bool(info.get("success") and not info["slipped"] and not info["opened_early"]
-                   and not info["penetration_failure"] and rise_mm<=1.5)
-    reason = "success" if success else "unload_overrun" if rise_mm>1.5 else "slip" if env.slip_count else (
-        "penetration" if info.get("penetration_failure") else "deep_jam" if env.max_near_depth_mm>=15 else "rim_jam")
-    tip,axis,xy,depth,tilt = env.bolt_pose()
-    mouth_xy = xy+depth*axis[:2]/max(axis[2],.01)
-    gap = tip[2]-env.floor_z-SHAFT_RADIUS*np.linalg.norm(axis[:2])
-    result = dict(success=success,reason=reason,slipped=int(env.slip_count),opened_early=int(env.open_count),
-                  frames=env.steps-saved["step"],first_jump_mrad=first_jump,first_arm_jump_mrad=arm_jump,
-                  peak_jump_mrad=peak_jump,unload_rise_mm=rise_mm,ik_failures=ik_failures,
-                  max_penetration_mm=float(env.max_penetration)*1000,max_depth_mm=env.max_near_depth_mm,
-                  final_depth_mm=depth*1000,final_xy_mm=float(np.linalg.norm(xy)*1000),final_tilt_deg=tilt,
-                  final_gap_mm=float(gap*1000),final_mouth_xy_mm=float(np.linalg.norm(mouth_xy)*1000),
-                  seated_ms=env.max_streak*env.model.opt.timestep*1000)
-    return result,frames
+        q[:4] = following
+    return best
+
+
+class LockedRollTeacher:
+    def __init__(self, env):
+        tip, axis, _, _, _ = env.bolt_pose()
+        self.start_tip, self.start_axis = tip.copy(),axis.copy()
+        self.lift_z = tip[2]+.00065
+        self.bottom = env.floor_z+.0005
+        self.center = env.model.body(env.target_id).pos[:2].copy()
+        self.command = env.data.ctrl.copy()
+        self.wrist_roll = float(np.float32(self.command[4]))
+        self.command[4:] = self.wrist_roll, GRIP
+        self.xy_bias = np.zeros(2)
+        self.last_delta = np.zeros(4)
+        self.tick = 0
+        self.align_ticks = FPS
+        # Match the original expert's 65 ticks at 50 Hz, scaled to the local descent distance.
+        self.down_per_tick = (MOUTH_Z+.005-self.bottom)/np.ceil(65*FPS/50)
+
+    def next_command(self, env):
+        if self.tick:
+            blend = min(self.tick/self.align_ticks,1.)
+            blend = blend*blend*(3.-2.*blend)
+            up = (1-blend)*self.start_axis+blend*np.array([0.,0.,1.])
+            up /= np.linalg.norm(up)
+            tip, _, _, _, _ = env.bolt_pose()
+            xy = (1-blend)*self.start_tip[:2]+blend*self.center
+            self.xy_bias = np.clip(self.xy_bias+np.clip(.2*(xy-tip[:2]),-.0001,.0001),-.002,.002)
+            z = (1-blend)*self.start_tip[2]+blend*self.lift_z
+            if self.tick > self.align_ticks:
+                z = max(self.bottom,self.lift_z-(self.tick-self.align_ticks)*self.down_per_tick)
+            goal = locked_bolt_ik(env,np.r_[xy+self.xy_bias,z],up,self.wrist_roll)
+            delta = np.clip(goal[:4]-self.command[:4],-.05,.05)
+            self.last_delta += np.clip(delta-self.last_delta,-.006,.006)
+            self.command[:4] = np.clip(self.command[:4]+self.last_delta,env.low[:4],env.high[:4])
+        self.tick += 1
+        return self.command.astype(np.float32)
 
 
 def save_frames(path,frames):
@@ -208,55 +186,51 @@ def screen(args, features, env):
         baseline,_ = replay(env,features,row["case"],row["seed"],corrected=True)
         row["base"] = {k:baseline[k] for k in ("success","slipped","opened_early","timeout","steps","max_penetration_mm")}
         row["base"]["reason"] = failure_mode(baseline,env)[0]
-        if not baseline["success"] and env.takeover is not None:
-            saved = env.takeover.copy()
-            physics = saved.pop("physics")
-            row["takeover"] = saved
-            if args.phase=="screen":
-                np.save(path.with_suffix(".npy"),physics)
-            else:
-                result, frames = teach(env,row["case"],saved|dict(physics=physics),record=True,
-                                       unload_mm=args.unload_mm,align_ticks=args.align_ticks,descent_mm=args.descent_mm,
-                                       stall_feedback=args.stall_feedback)
-                row["teacher"] = result
-                if result["success"]:
-                    save_frames(path.with_suffix(".npz"),frames)
         save_json(path,row)
-        print(args.phase,i,"base",row["base"]["reason"] or "success",
-              "teacher",row.get("teacher",{}).get("reason"),flush=True)
+        print("SCREEN",i,row["base"]["reason"] or "success",flush=True)
 
 
-def dry_run(args,env):
-    failed = [p for p in paths(args,"screen") if not json.loads(p.read_text())["base"]["success"]][:GATE_SIZE]
-    assert len(failed)==GATE_SIZE
+def dry_run(args,features,env):
+    failed = [p for p in sorted(args.screened.glob("[0-9]*.json"))
+              if not json.loads(p.read_text())["base"]["success"]][:GATE_SIZE]
+    if len(failed) != GATE_SIZE:
+        raise ValueError("Expected the original 25 screened failures")
     folder = args.output/args.gate_dir
     folder.mkdir(exist_ok=True)
     for path in failed[args.shard::args.shards]:
+        result = folder/path.name
+        if result.exists():
+            continue
         row = json.loads(path.read_text())
-        saved = row.get("takeover")
-        if saved:
-            saved = saved | dict(physics=np.load(path.with_suffix(".npy")))
-        result,_ = teach(env,row["case"],saved,record=False,unload_mm=args.unload_mm,
-                         align_ticks=args.align_ticks,descent_mm=args.descent_mm,stall_feedback=args.stall_feedback)
-        if saved is None:
-            result["slipped"] = row["base"]["slipped"]
-        save_json(folder/path.name,row|dict(teacher=result))
-        print("TEACH_GATE",row["index"],row["base"]["reason"],result,flush=True)
+        end,_ = replay(env,features,row["case"],row["seed"],corrected=True)
+        clean = bool(env.takeover and end["success"] and not end["slipped"] and not end["opened_early"]
+                     and not end["penetration_failure"])
+        reason = failure_mode(end,env)[0]
+        if clean:
+            save_frames(result.with_suffix(".npz"),env.frames)
+        teacher = dict(success=clean,inserted_without_takeover=bool(end["success"] and not env.takeover),
+                       reason="success" if clean else reason or "no_clean_takeover",slipped=end["slipped"],
+                       opened_early=end["opened_early"],timeout=end["timeout"],frames=len(env.frames) if clean else 0,
+                       takeover_frames=len(env.frames),first_jump_mrad=env.first_jump_mrad,peak_jump_mrad=env.peak_jump_mrad,
+                       peak_rise_mm=env.peak_rise_mm,max_penetration_mm=end["max_penetration_mm"],
+                       max_depth_mm=env.max_near_depth_mm,
+                       wrist_roll_rad=env.teacher.wrist_roll if env.teacher else None)
+        case = {k:row[k] for k in ("index","seed","case","base")}
+        save_json(result,case | dict(takeover=env.takeover,teacher=teacher))
+        print("TEACH_GATE",row["index"],env.takeover,teacher,flush=True)
 
 
 def report_gate(args):
     rows = [json.loads(p.read_text()) for p in paths(args,args.gate_dir)]
-    assert len(rows)==GATE_SIZE
+    assert len(rows) == GATE_SIZE
     saved = [r["teacher"] for r in rows]
     rescued = sum(r["success"] for r in saved)
-    slips = sum(bool(r["slipped"]) for r in saved)
-    result = dict(episodes=len(rows),rescued=rescued,slips=slips,passed=rescued>=18 and slips==0,
-                  first_max_jump_mrad=max(r.get("first_jump_mrad",0.) for r in saved),
-                  first_max_arm_jump_mrad=max(r.get("first_arm_jump_mrad",0.) for r in saved),
-                  reasons=dict(Counter(r["reason"] for r in saved)),teacher_parameters=dict(
-                      unload_mm=args.unload_mm,align_ticks=args.align_ticks,descent_mm=args.descent_mm,
-                      stall_feedback=args.stall_feedback),
-                  rows=rows)
+    result = dict(episodes=len(rows),rescued=rescued,slips=sum(bool(r["slipped"]) for r in saved),
+                  takeovers=sum(r["takeover"] is not None for r in rows),
+                  inserted_without_takeover=sum(r["inserted_without_takeover"] for r in saved),
+                  average_success_frames=float(np.mean([r["frames"] for r in saved if r["success"]])) if rescued else None,
+                  first_max_jump_mrad=max(r["first_jump_mrad"] for r in saved),
+                  reasons=dict(Counter(r["reason"] for r in saved)),rows=rows)
     save_json(args.output/f"{args.gate_dir}.json",result)
     print("TEACH_GATE_SUMMARY",{k:v for k,v in result.items() if k!="rows"},flush=True)
 
@@ -270,9 +244,12 @@ def build_dataset(args):
         raise RuntimeError("Wrong original 150-episode dataset")
     if list(original.tasks.index)!=[TASK] or set(original.camera_keys)!=set(CAMERAS):
         raise RuntimeError("Original dataset task text or camera keys differ")
-    rows = [(json.loads(p.read_text()),p.with_suffix(".npz")) for p in paths(args,"collect")]
-    selected = [(r,p) for r,p in rows if r.get("teacher",{}).get("success")][:COLLECTION_SIZE]
-    assert len(selected)==COLLECTION_SIZE
+    rows = [(json.loads(p.read_text()),p.with_suffix(".npz")) for p in paths(args,args.gate_dir)]
+    assert len(rows)==GATE_SIZE
+    selected = [(r,p) for r,p in rows if r["teacher"]["success"]]
+    if not selected:
+        print("No successful teacher clips to audit",flush=True)
+        return
     path = args.output/"dagger-dataset"
     dataset = create_dataset(path,DAGGER_ID)
     frames = 0
@@ -285,6 +262,7 @@ def build_dataset(args):
                 assert all(len(v)==count for v in arrays.values())
                 assert all(arrays[k].shape==(count,IMAGE_SIZE,IMAGE_SIZE,3) for k in CAMERAS)
                 assert np.allclose(arrays["action"][:,-1],GRIP,rtol=0,atol=1e-8)
+                assert np.all(arrays["action"][:,4]==row["teacher"]["wrist_roll_rad"])
                 for i in range(count):
                     dataset.add_frame({k:v[i] for k,v in arrays.items()}|dict(task=TASK))
                 dataset.save_episode()
@@ -296,7 +274,7 @@ def build_dataset(args):
                        aggr_root=destination,concatenate_videos=False,concatenate_data=False)
     added = LeRobotDatasetMetadata(DAGGER_ID,root=path)
     merged = LeRobotDatasetMetadata(MIXED_ID,root=destination)
-    assert merged.total_frames==original.total_frames+frames and merged.total_episodes==150+COLLECTION_SIZE
+    assert merged.total_frames==original.total_frames+frames and merged.total_episodes==150+len(selected)
     assert merged.fps==added.fps==FPS and list(merged.tasks.index)==list(added.tasks.index)==[TASK]
     for key in (*CAMERAS,STATS,"action"):
         assert tuple(original.features[key]["shape"])==tuple(added.features[key]["shape"])==tuple(merged.features[key]["shape"])
@@ -307,6 +285,17 @@ def build_dataset(args):
                   selected=[r for r,_ in selected])
     save_json(args.output/"dataset.json",report)
     print("DAGGER_DATASET",{k:v for k,v in report.items() if k!="selected"},flush=True)
+
+    videos = args.output/"videos"
+    videos.mkdir(exist_ok=True)
+    for row,file in selected[:3]:
+        with np.load(file) as pack:
+            rgb = np.concatenate([pack[key] for key in CAMERAS],axis=2)
+        video = videos/f'{row["index"]:04d}.mp4'
+        subprocess.run(["ffmpeg","-y","-hide_banner","-loglevel","error","-f","rawvideo","-pixel_format","rgb24",
+                        "-video_size",f"{2*IMAGE_SIZE}x{IMAGE_SIZE}","-framerate",str(FPS),"-i","pipe:0",
+                        "-c:v","libx264","-pix_fmt","yuv420p","-movflags","+faststart","-threads","1",str(video)],
+                       input=rgb.tobytes(),check=True)
 
 
 def evaluate(args,env,features,held):
@@ -351,12 +340,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("checkpoint","monitor","episodes","baseline","splits","output","original"):
         parser.add_argument(f"--{name}",required=True,type=Path)
-    parser.add_argument("--phase",required=True,choices=("plan","screen","gate","gate-report","collect","dataset","eval","summary"))
+    parser.add_argument("--phase",required=True,choices=("plan","screen","gate","gate-report","dataset","eval","summary"))
     parser.add_argument("--gate-dir",default="gate")
-    parser.add_argument("--unload-mm",type=float,default=1.2)
-    parser.add_argument("--align-ticks",type=int,default=26)
-    parser.add_argument("--descent-mm",type=float,default=.55)
-    parser.add_argument("--stall-feedback",action="store_true")
+    parser.add_argument("--screened",type=Path)
     parser.add_argument("--start",type=int,default=0)
     parser.add_argument("--stop",type=int)
     parser.add_argument("--shard",type=int,default=0)
@@ -375,17 +361,18 @@ def main():
         if args.phase=="plan":
             candidate_plan(args,held,train,val)
             return
-        env_class = EndToEndTelemetry if args.phase=="eval" else ScreenInsertion
-        env = env_class(penetration_limit_mm=LIMIT_MM)
+        env_type = StallInsertion if args.phase=="gate" else EndToEndTelemetry
+        env = env_type(penetration_limit_mm=LIMIT_MM)
         try:
+            features = FrozenSmolVLA(args.checkpoint)
             if args.phase=="gate":
-                dry_run(args,env)
+                if args.screened is None:
+                    parser.error("--screened is required for the original gate cases")
+                dry_run(args,features,env)
+            elif args.phase=="eval":
+                evaluate(args,env,features,held)
             else:
-                features = FrozenSmolVLA(args.checkpoint)
-                if args.phase=="eval":
-                    evaluate(args,env,features,held)
-                else:
-                    screen(args,features,env)
+                screen(args,features,env)
         finally:
             env.close()
 
