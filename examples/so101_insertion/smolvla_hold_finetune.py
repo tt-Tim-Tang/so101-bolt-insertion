@@ -114,8 +114,8 @@ def clean_hold_expert(
     record=None,
     *,
     seat_offset: float = 0.0005,
-    settle_ticks: int = 10,
-    hold_frames: int = 35,
+    settle_ticks: int = 4,
+    hold_frames: int = 40,
 ):
     """Run the 25 Hz expert with locked wrist_roll during descent and a static bottom hold."""
     env.start(case)
@@ -863,8 +863,8 @@ def main() -> None:
     for k in ("original-dataset", "splits", "historical", "output", "scratch"):
         p_col.add_argument(f"--{k}", type=Path, required=True)
     p_col.add_argument("--episodes", type=int, default=50)
-    p_col.add_argument("--settle-ticks", type=int, default=10)
-    p_col.add_argument("--hold-frames", type=int, default=35)
+    p_col.add_argument("--settle-ticks", type=int, default=4)
+    p_col.add_argument("--hold-frames", type=int, default=40)
 
     p_aud = sub.add_parser("audit")
     for k in ("checkpoint", "original-dataset", "mixed-dataset", "manifest", "output"):
